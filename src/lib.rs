@@ -10,6 +10,8 @@
 
 pub mod coroutines;
 mod response;
+#[path = "1.1/mod.rs"]
+pub mod v1_1;
 
 #[doc(inline)]
 pub use self::response::Response;
