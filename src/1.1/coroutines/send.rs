@@ -1,17 +1,23 @@
 use std::mem;
 
 use http::{
-    header::{CONTENT_LENGTH, TRANSFER_ENCODING},
+    header::{CONNECTION, CONTENT_LENGTH, TRANSFER_ENCODING},
     response::Builder as ResponseBuilder,
     Request, Response, Version,
 };
 use io_stream::{
-    coroutines::{Read, ReadExact, ReadToEnd, Write},
-    Io,
+    coroutines::{
+        read::{Read, ReadError, ReadResult},
+        read_exact::{ReadExact, ReadExactError, ReadExactResult},
+        read_to_end::{ReadToEnd, ReadToEndResult},
+        write::{Write, WriteError, WriteResult},
+    },
+    io::StreamIo,
 };
-use log::{debug, info, log_enabled, trace, Level};
+use log::{info, log_enabled, trace, Level};
+use thiserror::Error;
 
-use super::ChunkedTransferCoding;
+use super::read_chunks::{ReadChunks, ReadChunksError, ReadChunksResult};
 
 const CR: u8 = b'\r';
 const CRLF: [u8; 2] = [CR, LF];
@@ -21,42 +27,109 @@ const SP: u8 = b' ';
 const CRLF_CRLF: [u8; 4] = [CR, LF, CR, LF];
 
 #[derive(Debug)]
-pub enum State {
+pub struct SendOk {
+    /// The initial sent request.
+    pub request: Request<Vec<u8>>,
+    /// The response received.
+    pub response: Response<Vec<u8>>,
+    /// Is the connection still alive? If not, then a new
+    /// connection needs to be established.
+    pub keep_alive: bool,
+}
+
+#[derive(Debug, Error)]
+pub enum SendError {
+    #[error("Parse HTTP response headers error: {0}")]
+    ParseResponseHeaders(#[source] httparse::Error),
+    #[error("Received unexpected EOF")]
+    UnexpectedEof,
+
+    #[error(transparent)]
+    Read(#[from] ReadError),
+    #[error(transparent)]
+    ReadChunks(#[from] ReadChunksError),
+    #[error(transparent)]
+    ReadExact(#[from] ReadExactError),
+    #[error(transparent)]
+    Write(#[from] WriteError),
+}
+
+/// Send result returned by the coroutine's resume function.
+#[derive(Debug)]
+pub enum SendResult {
+    /// The coroutine has successfully terminated its execution.
+    Ok(SendOk),
+    /// The coroutine encountered an error.
+    Err(SendError),
+    /// The coroutine wants stream I/O.
+    Io(StreamIo),
+}
+
+/// The internal state of the [`Send`] HTTP request coroutine.
+#[derive(Debug)]
+enum State {
+    /// Step for serializin the request into bytes.
     Serialize,
+
+    /// Step for sending the request bytes.
     Send(Write),
-    ReceiveHeaders {
-        read: Read,
-        headers: Vec<u8>,
-    },
+
+    /// Step for receiving response headers.
+    ReceiveHeaders { read: Read, headers: Vec<u8> },
+
+    /// Step for receiving the response body as chunks.
+    ///
+    /// This step is used when the `Transfer-Encoding` response header
+    /// is defined and valid.
+    ///
+    /// Refs: <https://datatracker.ietf.org/doc/html/rfc9112#field.transfer-encoding>
     ReceiveChunkedBody {
-        read: ChunkedTransferCoding,
+        read: ReadChunks,
         response: ResponseBuilder,
     },
+
+    /// Step for receiving the response body when the body size is
+    /// fixed.
+    ///
+    /// This step is used when the `Content-Length` response header is
+    /// defined and valid.
+    ///
+    /// Refs: <https://datatracker.ietf.org/doc/html/rfc9112#body.content-length>
     ReceiveLengthedBody {
         read: ReadExact,
         response: ResponseBuilder,
     },
+
+    /// Step for receiving the response body until EOF.
+    ///
+    /// This step is used as fallback when the `Transfer-Encoding` or
+    /// `Content-Length` response header is undefined or invalid.
     ReceiveBody {
         read: ReadToEnd,
         response: ResponseBuilder,
     },
 }
 
+/// The send HTTP request coroutine.
 #[derive(Debug)]
 pub struct Send {
-    state: State,
     request: Request<Vec<u8>>,
+    state: State,
+    is_http_10: bool,
+    is_conn_closed: bool,
 }
 
 impl Send {
     pub fn new(request: Request<Vec<u8>>) -> Self {
         Self {
-            state: State::Serialize,
             request,
+            state: State::Serialize,
+            is_http_10: false,
+            is_conn_closed: false,
         }
     }
 
-    pub fn resume(&mut self, mut input: Option<Io>) -> Result<Response<Vec<u8>>, Io> {
+    pub fn resume(&mut self, mut input: Option<StreamIo>) -> SendResult {
         if input.is_none() {
             info!("send HTTP request");
         }
@@ -102,12 +175,14 @@ impl Send {
                     self.state = State::Send(write);
                 }
                 State::Send(write) => {
-                    if let Err(io) = write.resume(input.take()) {
-                        debug!("break: need I/O to send HTTP request");
-                        return Err(io);
-                    } else {
-                        debug!("resume after HTTP response sent");
-                    }
+                    match write.resume(input.take()) {
+                        WriteResult::Ok(_) => (),
+                        WriteResult::Err(err) => return SendResult::Err(err.into()),
+                        WriteResult::Io(io) => return SendResult::Io(io),
+                        WriteResult::Eof => return SendResult::Err(SendError::UnexpectedEof),
+                    };
+
+                    trace!("resume after sending HTTP response");
 
                     self.state = State::ReceiveHeaders {
                         read: Read::default(),
@@ -116,19 +191,13 @@ impl Send {
                 }
                 State::ReceiveHeaders { read, headers } => {
                     let output = match read.resume(input.take()) {
-                        Ok(output) => {
-                            debug!("resume after partial HTTP response headers received");
-                            output
-                        }
-                        Err(io) => {
-                            debug!("break: need I/O to receive HTTP response headers");
-                            return Err(io);
-                        }
+                        ReadResult::Ok(output) => output,
+                        ReadResult::Err(err) => return SendResult::Err(err.into()),
+                        ReadResult::Io(io) => return SendResult::Io(io),
+                        ReadResult::Eof => return SendResult::Err(SendError::UnexpectedEof),
                     };
 
-                    if output.bytes_count == 0 {
-                        return Err(Io::err("received 0 bytes, reached EOF?"));
-                    }
+                    trace!("resume after receiving partial HTTP response headers");
 
                     headers.extend(output.bytes());
 
@@ -138,14 +207,11 @@ impl Send {
                     let n = match parsed.parse(headers) {
                         Ok(httparse::Status::Complete(n)) => n,
                         Ok(httparse::Status::Partial) => {
-                            debug!("received incomplete HTTP response headers, need more bytes");
+                            trace!("received incomplete HTTP response headers, need more bytes");
                             read.replace(output.buffer);
                             continue;
                         }
-                        Err(err) => {
-                            let err = format!("parse HTTP headers error: {err}");
-                            return Err(Io::err(err));
-                        }
+                        Err(err) => return SendResult::Err(SendError::ParseResponseHeaders(err)),
                     };
 
                     if log_enabled!(Level::Trace) {
@@ -156,8 +222,13 @@ impl Send {
                     let mut response = Response::builder();
 
                     match parsed.version {
-                        Some(0) => response = response.version(Version::HTTP_10),
-                        Some(1) => response = response.version(Version::HTTP_11),
+                        Some(0) => {
+                            self.is_http_10 = true;
+                            response = response.version(Version::HTTP_10);
+                        }
+                        Some(1) => {
+                            response = response.version(Version::HTTP_11);
+                        }
                         _ => (),
                     }
 
@@ -172,16 +243,25 @@ impl Send {
                     let body = headers.drain(n..);
 
                     let Some(headers) = response.headers_ref() else {
-                        let response = response.body(body.collect());
-                        break Ok(response.unwrap());
+                        break SendResult::Ok(SendOk {
+                            request: mem::take(&mut self.request),
+                            response: response.body(body.collect()).unwrap(),
+                            keep_alive: !self.is_http_10,
+                        });
                     };
+
+                    if let Some(conn) = headers.get(CONNECTION) {
+                        self.is_conn_closed = conn == "close";
+                    } else {
+                        self.is_conn_closed = self.is_http_10;
+                    }
 
                     if let Some(encoding) = headers.get(TRANSFER_ENCODING) {
                         if encoding == "chunked" {
                             let mut read = Read::with_capacity(output.buffer.capacity());
                             read.replace(output.buffer);
 
-                            let mut read = ChunkedTransferCoding::new(read);
+                            let mut read = ReadChunks::new(read);
                             read.extend(body);
 
                             self.state = State::ReceiveChunkedBody { read, response };
@@ -192,12 +272,10 @@ impl Send {
                     if let Some(len) = headers.get(CONTENT_LENGTH) {
                         if let Ok(len) = len.to_str() {
                             if let Ok(len) = usize::from_str_radix(len, 10) {
-                                if len > 0 {
-                                    let mut read = ReadExact::new(len);
-                                    read.extend(body);
-                                    self.state = State::ReceiveLengthedBody { read, response };
-                                    continue;
-                                }
+                                let mut read = ReadExact::new(len);
+                                read.extend(body);
+                                self.state = State::ReceiveLengthedBody { read, response };
+                                continue;
                             }
                         }
                     }
@@ -207,16 +285,43 @@ impl Send {
                     self.state = State::ReceiveBody { read, response };
                 }
                 State::ReceiveChunkedBody { read, response } => {
-                    let body = read.resume(input.take())?;
-                    break Ok(mem::take(response).body(body).unwrap());
+                    let body = match read.resume(input.take()) {
+                        ReadChunksResult::Ok(body) => body,
+                        ReadChunksResult::Err(err) => return SendResult::Err(err.into()),
+                        ReadChunksResult::Io(io) => return SendResult::Io(io),
+                    };
+
+                    break SendResult::Ok(SendOk {
+                        request: mem::take(&mut self.request),
+                        response: mem::take(response).body(body).unwrap(),
+                        keep_alive: !self.is_conn_closed,
+                    });
                 }
                 State::ReceiveLengthedBody { read, response } => {
-                    let body = read.resume(input.take())?;
-                    break Ok(mem::take(response).body(body).unwrap());
+                    let body = match read.resume(input.take()) {
+                        ReadExactResult::Ok(body) => body,
+                        ReadExactResult::Err(err) => return SendResult::Err(err.into()),
+                        ReadExactResult::Io(io) => return SendResult::Io(io),
+                    };
+
+                    break SendResult::Ok(SendOk {
+                        request: mem::take(&mut self.request),
+                        response: mem::take(response).body(body).unwrap(),
+                        keep_alive: !self.is_conn_closed,
+                    });
                 }
                 State::ReceiveBody { read, response } => {
-                    let body = read.resume(input.take())?;
-                    break Ok(mem::take(response).body(body).unwrap());
+                    let body = match read.resume(input.take()) {
+                        ReadToEndResult::Ok(body) => body,
+                        ReadToEndResult::Err(err) => return SendResult::Err(err.into()),
+                        ReadToEndResult::Io(io) => return SendResult::Io(io),
+                    };
+
+                    break SendResult::Ok(SendOk {
+                        request: mem::take(&mut self.request),
+                        response: mem::take(response).body(body).unwrap(),
+                        keep_alive: !self.is_conn_closed,
+                    });
                 }
             }
         }

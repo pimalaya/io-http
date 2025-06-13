@@ -30,3 +30,8 @@ httparse = "1.10"
 io-stream = { version = "0.0.1", default-features = false }
 log = "0.4"
 memchr = "2.7"
+thiserror = "2"
+
+[patch.crates-io]
+# io-stream.git = "https://github.com/pimalaya/io-stream"
+io-stream.path = "../stream"
