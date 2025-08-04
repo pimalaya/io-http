@@ -1,34 +1,71 @@
-//! https://datatracker.ietf.org/doc/html/rfc2616#section-3.6.1
+//! I/O-free coroutine to read HTTP response following the Chunked
+//! Transfer Coding.
+//!
+//! Refs: https://datatracker.ietf.org/doc/html/rfc2616#section-3.6.1
 
 use std::mem;
 
-use io_stream::{coroutines::Read, Io};
+use io_stream::{
+    coroutines::read::{ReadStream, ReadStreamError, ReadStreamResult},
+    io::StreamIo,
+};
 use memchr::memmem;
+use thiserror::Error;
 
 const CR: u8 = b'\r';
-const CRLF: [u8; 2] = [CR, LF];
 const LF: u8 = b'\n';
-
+const CRLF: [u8; 2] = [CR, LF];
 const CRLF_CRLF: [u8; 4] = [CR, LF, CR, LF];
 
+/// Errors that can occur during the coroutine progression.
+#[derive(Debug, Error)]
+pub enum ReadStreamChunksError {
+    /// The coroutine unexpectedly reached the End Of File.
+    #[error("Received unexpected EOF")]
+    UnexpectedEof,
+    /// The coroutine could not exactly read n bytes.
+    #[error("Received invalid chunk size: {0}")]
+    InvalidChunkSize(String),
+
+    #[error(transparent)]
+    ReadStream(#[from] ReadStreamError),
+}
+
+/// Send result returned by the coroutine's resume function.
 #[derive(Debug)]
-pub enum State {
+pub enum ReadStreamChunksResult {
+    /// The coroutine wants stream I/O.
+    Io(StreamIo),
+
+    /// The coroutine encountered an error.
+    Err(ReadStreamChunksError),
+
+    /// The coroutine has successfully terminated its execution.
+    Ok(Vec<u8>),
+}
+
+#[derive(Debug)]
+enum State {
     ChunkSize,
-    // TODO: use ReadExact from io-stream
+    // TODO: use ReadStreamExact from io-stream
     ChunkData(usize),
     Trailer,
 }
 
+/// I/O-free coroutine to read HTTP response following the Chunked
+/// Transfer Coding.
 #[derive(Debug)]
-pub struct ChunkedTransferCoding {
-    read: Read,
+pub struct ReadStreamChunks {
+    read: ReadStream,
     state: State,
     buffer: Vec<u8>,
     body: Vec<u8>,
 }
 
-impl ChunkedTransferCoding {
-    pub fn new(read: impl Into<Read>) -> Self {
+impl ReadStreamChunks {
+    /// Creates a new coroutine from the given [`ReadStream`]
+    /// sub-coroutine.
+    pub fn new(read: impl Into<ReadStream>) -> Self {
         Self {
             read: read.into(),
             state: State::ChunkSize,
@@ -37,11 +74,13 @@ impl ChunkedTransferCoding {
         }
     }
 
+    /// Extends the inner read buffer with the given bytes.
     pub fn extend(&mut self, bytes: impl IntoIterator<Item = u8>) {
         self.buffer.extend(bytes);
     }
 
-    pub fn resume(&mut self, mut input: Option<Io>) -> Result<Vec<u8>, Io> {
+    /// Makes the coroutine progress.
+    pub fn resume(&mut self, mut arg: Option<StreamIo>) -> ReadStreamChunksResult {
         loop {
             match &mut self.state {
                 State::ChunkSize => {
@@ -50,7 +89,18 @@ impl ChunkedTransferCoding {
 
                     // find chunk CRLF, otherwise read bytes
                     let Some(crlf) = memmem::find(&self.buffer, &CRLF) else {
-                        let output = self.read.resume(input.take())?;
+                        let output = match self.read.resume(arg.take()) {
+                            ReadStreamResult::Ok(output) => output,
+                            ReadStreamResult::Err(err) => {
+                                return ReadStreamChunksResult::Err(err.into())
+                            }
+                            ReadStreamResult::Io(io) => return ReadStreamChunksResult::Io(io),
+                            ReadStreamResult::Eof => {
+                                return ReadStreamChunksResult::Err(
+                                    ReadStreamChunksError::UnexpectedEof,
+                                )
+                            }
+                        };
                         self.buffer.extend(output.bytes());
                         self.read.replace(output.buffer);
                         continue;
@@ -62,7 +112,10 @@ impl ChunkedTransferCoding {
                     // extract chunk size
                     let chunk_size = String::from_utf8_lossy(&self.buffer[..ext]);
                     let Ok(chunk_size) = usize::from_str_radix(&chunk_size, 16) else {
-                        return Err(Io::Error(format!("invalid chunk size: {chunk_size}")));
+                        let chunk_size = chunk_size.to_string();
+                        return ReadStreamChunksResult::Err(
+                            ReadStreamChunksError::InvalidChunkSize(chunk_size),
+                        );
                     };
 
                     // if chunk size is 0, search for trailer
@@ -89,7 +142,18 @@ impl ChunkedTransferCoding {
                 }
                 State::ChunkData(_) if self.buffer.is_empty() => {
                     // empty buffer, read bytes
-                    let output = self.read.resume(input.take())?;
+                    let output = match self.read.resume(arg.take()) {
+                        ReadStreamResult::Ok(output) => output,
+                        ReadStreamResult::Err(err) => {
+                            return ReadStreamChunksResult::Err(err.into())
+                        }
+                        ReadStreamResult::Io(io) => return ReadStreamChunksResult::Io(io),
+                        ReadStreamResult::Eof => {
+                            return ReadStreamChunksResult::Err(
+                                ReadStreamChunksError::UnexpectedEof,
+                            )
+                        }
+                    };
                     self.buffer.extend(output.bytes());
                     self.read.replace(output.buffer);
                 }
@@ -102,13 +166,24 @@ impl ChunkedTransferCoding {
                 State::Trailer => {
                     // a double CRLF CRLF means the end of trailer
                     let Some(0) = memmem::rfind(&self.buffer, &CRLF_CRLF) else {
-                        let output = self.read.resume(input.take())?;
+                        let output = match self.read.resume(arg.take()) {
+                            ReadStreamResult::Ok(output) => output,
+                            ReadStreamResult::Err(err) => {
+                                return ReadStreamChunksResult::Err(err.into())
+                            }
+                            ReadStreamResult::Io(io) => return ReadStreamChunksResult::Io(io),
+                            ReadStreamResult::Eof => {
+                                return ReadStreamChunksResult::Err(
+                                    ReadStreamChunksError::UnexpectedEof,
+                                )
+                            }
+                        };
                         self.buffer.extend(output.bytes());
                         self.read.replace(output.buffer);
                         continue;
                     };
 
-                    break Ok(mem::take(&mut self.body));
+                    break ReadStreamChunksResult::Ok(mem::take(&mut self.body));
                 }
             }
         }
@@ -119,31 +194,34 @@ impl ChunkedTransferCoding {
 mod tests {
     use std::io::{BufReader, Read as _};
 
-    use io_stream::{coroutines::Read, Io, Output};
+    use io_stream::{
+        coroutines::read::ReadStream,
+        io::{StreamIo, StreamOutput},
+    };
 
-    use super::ChunkedTransferCoding;
+    use crate::v1_1::coroutines::read_chunks::ReadStreamChunksResult;
+
+    use super::ReadStreamChunks;
 
     fn test(encoded: &str, decoded: &str) {
         let mut reader = BufReader::new(encoded.as_bytes());
 
-        let read = Read::default();
-        let mut http = ChunkedTransferCoding::new(read);
+        let read = ReadStream::default();
+        let mut http = ReadStreamChunks::new(read);
         let mut arg = None;
 
         let body = loop {
             match http.resume(arg.take()) {
-                Ok(body) => break body,
-                Err(Io::Read(Err(mut buffer))) => {
+                ReadStreamChunksResult::Ok(output) => break output,
+                ReadStreamChunksResult::Io(StreamIo::Read(Err(mut buffer))) => {
                     let bytes_count = reader.read(&mut buffer).unwrap();
-
-                    let output = Output {
+                    let output = StreamOutput {
                         buffer,
                         bytes_count,
                     };
-
-                    arg = Some(Io::Read(Ok(output)))
+                    arg = Some(StreamIo::Read(Ok(output)))
                 }
-                Err(io) => unreachable!("unexpected I/O: {io:?}"),
+                other => unreachable!("Unexpected result: {other:?}"),
             }
         };
 

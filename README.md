@@ -22,51 +22,62 @@ The loop is the glue between coroutines and runtimes. It makes the coroutine pro
 
 ## Examples
 
-*See complete examples at [./examples](https://github.com/pimalaya/io-http/blob/master/examples).*
-
 ### Send HTTPS request via rustls synchronously
 
 ```rust,ignore
 use std::{net::TcpStream, sync::Arc};
 
-use io_http::{coroutines::Send, Request};
+use http::Request;
+use io_http::v1_1::coroutines::send::{SendHttp, SendHttpResult};
 use io_stream::runtimes::std::handle;
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
 use rustls_platform_verifier::ConfigVerifierExt;
 
 // build TLS stream
+
 let domain = "github.com"
-let config = ClientConfig::with_platform_verifier();
+let config = ClientConfig::with_platform_verifier().unwrap();
 let server_name = domain.to_string().try_into().unwrap();
 let conn = ClientConnection::new(Arc::new(config), server_name).unwrap();
 let tcp = TcpStream::connect((domain, 443)).unwrap();
 let tls = StreamOwned::new(conn, tcp);
 
 // send request send receive response
-let request = Request::new("GET", "/", "1.0").body("");
+
+let request = Request::get("/").body(vec![]).unwrap();
 
 let mut arg = None;
-let mut send = Send::new(request);
+let mut send = SendHttp::new(request);
 
 let response = loop {
-    match send.next() {
-        Ok(response) => break response,
-        Err(io) => arg = Some(handle(&mut stream, io).unwrap()),
+    match send.resume(arg.take()) {
+        SendHttpResult::Ok(result) => break result.response,
+        SendHttpResult::Err(err) => panic!("{err}"),
+        SendHttpResult::Io(io) => arg = Some(handle(&mut stream, io).unwrap()),
     }
 };
 ```
 
 *See complete example at [./examples/send.rs](https://github.com/pimalaya/io-http/blob/master/examples/send.rs).*
 
-```rust
-cargo run --example send
-```
-
-### More examples
+## More examples
 
 Have a look at projects built on the top of this library:
 
-- *TODO*
+- [io-addressbook](https://github.com/pimalaya/io-addressbook): Set of I/O-free coroutines to manage contacts
+- [io-oauth](https://github.com/pimalaya/io-oauth): Set of I/O-free Rust coroutines to manage OAuth flows
+- [io-starttls](https://github.com/pimalaya/io-starttls): I/O-free Rust coroutine to upgrade any plain stream to a secure one
+- [Cardamum](https://github.com/pimalaya/cardamum): CLI to manage contacts
+- [Ortie](https://github.com/pimalaya/ortie): CLI to manage OAuth access tokens
+
+## License
+
+This project is licensed under either of:
+
+- [MIT license](LICENSE-MIT)
+- [Apache License, Version 2.0](LICENSE-APACHE)
+
+at your option.
 
 ## Sponsoring
 

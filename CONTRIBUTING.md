@@ -1,6 +1,6 @@
 # Contributing guide
 
-Thank you for investing your time in contributing to the HTTP flows project.
+Thank you for investing your time in contributing to the I/O HTTP project.
 
 ## Development
 
@@ -24,20 +24,14 @@ or install manually the following dependencies:
 cargo build
 ```
 
-You can build a specific workspace:
-
-```
-cargo build -p http-lib
-```
-
 You can disable default [features](https://doc.rust-lang.org/cargo/reference/features.html) with `--no-default-features` and enable features with `--features feat1,feat2,feat3`.
 
 Finally, you can build a release with `--release`:
 
 ```
-cargo build -p http-lib --no-default-features --release
+cargo build --no-default-features --release
 ```
 
 ## Commit style
 
-Http libraries follow the [conventional commits specification](https://www.conventionalcommits.org/en/v1.0.0/#summary).
+I/O HTTP follows the [conventional commits specification](https://www.conventionalcommits.org/en/v1.0.0/#summary).

@@ -6,7 +6,7 @@ use std::{
 };
 
 use http::{header::LOCATION, Request};
-use io_http::v1_1::coroutines::Send;
+use io_http::v1_1::coroutines::send::{SendHttp, SendHttpResult};
 use io_stream::runtimes::std::handle;
 use log::info;
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
@@ -32,12 +32,13 @@ fn main() {
             .unwrap();
 
         let mut arg = None;
-        let mut send = Send::new(request);
+        let mut send = SendHttp::new(request);
 
         let response = loop {
             match send.resume(arg.take()) {
-                Ok(response) => break response,
-                Err(io) => arg = Some(handle(&mut stream, io).unwrap()),
+                SendHttpResult::Ok(result) => break result.response,
+                SendHttpResult::Err(err) => panic!("{err}"),
+                SendHttpResult::Io(io) => arg = Some(handle(&mut stream, io).unwrap()),
             }
         };
 
@@ -92,7 +93,7 @@ impl<T: Read + Write> StreamExt for T {}
 fn connect(url: &Url) -> Box<dyn StreamExt> {
     let domain = url.domain().unwrap();
     if url.scheme().eq_ignore_ascii_case("https") {
-        let config = ClientConfig::with_platform_verifier();
+        let config = ClientConfig::with_platform_verifier().unwrap();
         let server_name = domain.to_string().try_into().unwrap();
         let conn = ClientConnection::new(Arc::new(config), server_name).unwrap();
         let tcp = TcpStream::connect((domain.to_string(), 443)).unwrap();
