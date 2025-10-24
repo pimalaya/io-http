@@ -195,7 +195,7 @@ impl SendHttp {
                         }
                     };
 
-                    trace!("resume after sending HTTP response");
+                    trace!("resume after sending HTTP request");
 
                     self.state = State::ReceiveHeaders {
                         read: ReadStream::default(),
@@ -208,7 +208,7 @@ impl SendHttp {
                         ReadStreamResult::Err(err) => return SendHttpResult::Err(err.into()),
                         ReadStreamResult::Io(io) => return SendHttpResult::Io(io),
                         ReadStreamResult::Eof => {
-                            return SendHttpResult::Err(SendHttpError::UnexpectedEof)
+                            return SendHttpResult::Err(SendHttpError::UnexpectedEof);
                         }
                     };
 
@@ -237,6 +237,7 @@ impl SendHttp {
                     }
 
                     let mut response = Response::builder();
+                    let mut no_content = false;
 
                     match parsed.version {
                         Some(0) => {
@@ -250,6 +251,7 @@ impl SendHttp {
                     }
 
                     if let Some(code) = parsed.code {
+                        no_content = code == 204;
                         response = response.status(code);
                     }
 
@@ -271,6 +273,14 @@ impl SendHttp {
                         self.is_conn_closed = conn == "close";
                     } else {
                         self.is_conn_closed = self.is_http_10;
+                    }
+
+                    if no_content {
+                        break SendHttpResult::Ok(SendHttpOk {
+                            request: mem::take(&mut self.request),
+                            response: response.body(vec![]).unwrap(),
+                            keep_alive: !self.is_http_10,
+                        });
                     }
 
                     if let Some(encoding) = headers.get(TRANSFER_ENCODING) {
