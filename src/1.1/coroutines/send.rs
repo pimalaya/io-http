@@ -153,6 +153,12 @@ impl SendHttp {
                     bytes.extend(self.request.method().as_str().as_bytes());
                     bytes.push(SP);
                     bytes.extend(self.request.uri().path().as_bytes());
+
+                    if let Some(q) = self.request.uri().query() {
+                        bytes.extend(b"?");
+                        bytes.extend(q.as_bytes());
+                    }
+
                     bytes.push(SP);
                     bytes.extend(format!("{:?}", self.request.version()).into_bytes());
                     bytes.extend(CRLF);
