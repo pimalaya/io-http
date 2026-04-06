@@ -1,13 +1,15 @@
 use std::{
     env,
-    io::{stdin, stdout, Read, Write},
+    io::{Read, Write, stdin, stdout},
     net::TcpStream,
     sync::Arc,
 };
 
-use http::{header::LOCATION, Request};
-use io_http::v1_1::coroutines::send::{SendHttp, SendHttpResult};
-use io_stream::runtimes::std::handle;
+use io_http::{
+    rfc9110::request::HttpRequest,
+    rfc9112::send::{Http11Send, Http11SendResult},
+};
+use io_socket::runtimes::std_stream::handle;
 use log::info;
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
 use rustls_platform_verifier::ConfigVerifierExt;
@@ -22,58 +24,45 @@ fn main() {
     };
 
     // loop for potential redirections
-    let response = loop {
+    let response = 'outer: loop {
         info!("connect to {url}");
         let mut stream = connect(&url);
 
-        let request = Request::get(url.as_str())
+        let request = HttpRequest::get(url.clone())
             .header("Host", url.host_str().unwrap())
-            .body(vec![])
-            .unwrap();
+            .body(vec![]);
 
         let mut arg = None;
-        let mut send = SendHttp::new(request);
+        let mut send = Http11Send::new(request);
 
-        let response = loop {
+        loop {
             match send.resume(arg.take()) {
-                SendHttpResult::Ok(result) => break result.response,
-                SendHttpResult::Err(err) => panic!("{err}"),
-                SendHttpResult::Io(io) => arg = Some(handle(&mut stream, io).unwrap()),
+                Http11SendResult::Ok { response, .. } => break 'outer response,
+                Http11SendResult::Err { err } => panic!("{err}"),
+                Http11SendResult::Io { input } => arg = Some(handle(&mut stream, input).unwrap()),
+                Http11SendResult::Redirect { url: new_url, .. } => {
+                    info!("redirection requested");
+                    url = new_url;
+                    break;
+                }
             }
-        };
-
-        if !response.status().is_redirection() {
-            break response;
         }
-
-        info!("redirection requested");
-
-        let location = response
-            .headers()
-            .get(LOCATION)
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .parse()
-            .unwrap();
-
-        url = location;
     };
 
     println!("-------------------------");
     println!("-------- HEADERS --------");
     println!("-------------------------");
-    println!("{:?} {}", response.version(), response.status());
+    println!("{} {}", response.version, *response.status);
 
-    for (key, val) in response.headers() {
-        println!("{key}: {}", val.to_str().unwrap());
+    for (key, val) in &response.headers {
+        println!("{key}: {val}");
     }
 
     println!("-------------------------");
     println!("--------- BODY ----------");
     println!("-------------------------");
 
-    let body = String::from_utf8_lossy(response.body());
+    let body = String::from_utf8_lossy(&response.body);
     print!("{body}");
 }
 
@@ -96,11 +85,11 @@ fn connect(url: &Url) -> Box<dyn StreamExt> {
         let config = ClientConfig::with_platform_verifier().unwrap();
         let server_name = domain.to_string().try_into().unwrap();
         let conn = ClientConnection::new(Arc::new(config), server_name).unwrap();
-        let tcp = TcpStream::connect((domain.to_string(), 443)).unwrap();
+        let tcp = TcpStream::connect((domain, 443)).unwrap();
         let tls = StreamOwned::new(conn, tcp);
         Box::new(tls)
     } else {
-        let tcp = TcpStream::connect((domain.to_string(), 80)).unwrap();
+        let tcp = TcpStream::connect((domain, 80)).unwrap();
         Box::new(tcp)
     }
 }

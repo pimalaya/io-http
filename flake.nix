@@ -1,8 +1,10 @@
 {
-  description = "Set of I/O-free Rust coroutines to manage HTTP streams";
+  description = "I/O-free HTTP/1.X client library written in Rust";
 
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/staging-next";
+    nixpkgs = {
+      url = "github:nixos/nixpkgs/nixos-25.11";
+    };
     fenix = {
       url = "github:nix-community/fenix/monthly";
       inputs.nixpkgs.follows = "nixpkgs";
