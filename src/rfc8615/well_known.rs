@@ -140,7 +140,7 @@ impl WellKnown {
                 same_origin: true,
                 redirect_url: None,
             },
-            Http11SendResult::Redirect {
+            Http11SendResult::WantsRedirect {
                 url,
                 request,
                 response,

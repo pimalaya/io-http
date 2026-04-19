@@ -167,7 +167,7 @@ fn redirect_301_emits_redirect_result() {
         b"HTTP/1.1 301 Moved Permanently\r\nLocation: http://example.com/new\r\nContent-Length: 0\r\n\r\n";
 
     match test(response) {
-        Http11SendResult::Redirect { url, response, .. } => {
+        Http11SendResult::WantsRedirect { url, response, .. } => {
             assert_eq!(url.as_str(), "http://example.com/new");
             assert_eq!(*response.status, 301);
         }
@@ -181,7 +181,7 @@ fn redirect_same_origin() {
         b"HTTP/1.1 302 Found\r\nLocation: http://example.com/other\r\nContent-Length: 0\r\n\r\n";
 
     match test(response) {
-        Http11SendResult::Redirect { same_origin, .. } => assert!(same_origin),
+        Http11SendResult::WantsRedirect { same_origin, .. } => assert!(same_origin),
         other => panic!("unexpected result: {other:?}"),
     }
 }
@@ -192,7 +192,7 @@ fn redirect_cross_origin_different_host() {
         b"HTTP/1.1 302 Found\r\nLocation: http://other.com/\r\nContent-Length: 0\r\n\r\n";
 
     match test(response) {
-        Http11SendResult::Redirect { same_origin, .. } => assert!(!same_origin),
+        Http11SendResult::WantsRedirect { same_origin, .. } => assert!(!same_origin),
         other => panic!("unexpected result: {other:?}"),
     }
 }
@@ -203,7 +203,7 @@ fn redirect_cross_origin_different_scheme() {
         b"HTTP/1.1 302 Found\r\nLocation: https://example.com/\r\nContent-Length: 0\r\n\r\n";
 
     match test(response) {
-        Http11SendResult::Redirect { same_origin, .. } => assert!(!same_origin),
+        Http11SendResult::WantsRedirect { same_origin, .. } => assert!(!same_origin),
         other => panic!("unexpected result: {other:?}"),
     }
 }

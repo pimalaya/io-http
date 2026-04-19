@@ -60,7 +60,7 @@ async fn main() {
                 Http11SendResult::Io { input } => {
                     arg = Some(handle(&mut stream, input).await.unwrap())
                 }
-                Http11SendResult::Redirect { url: new_url, .. } => {
+                Http11SendResult::WantsRedirect { url: new_url, .. } => {
                     info!("redirection requested");
                     url = new_url;
                     break;
