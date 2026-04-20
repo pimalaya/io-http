@@ -12,31 +12,25 @@
 //! | Fixed-length | `Content-Length: <n>`        |
 //! | Read-to-EOF  | Neither header present       |
 
-use alloc::{format, string::String, vec, vec::Vec};
 use core::mem;
-use httparse::{EMPTY_HEADER, Response, Status};
 
-use log::{Level, log_enabled, trace};
+use alloc::{borrow::ToOwned, string::String, vec::Vec};
+
+use httparse::{EMPTY_HEADER, Response, Status};
+use log::trace;
 use thiserror::Error;
 use url::Url;
 
 use crate::{
     rfc1945::version::HTTP_10,
     rfc9110::{
-        headers::{CONNECTION, CONTENT_LENGTH, LOCATION, TRANSFER_ENCODING},
+        headers::{CONNECTION, CONTENT_LENGTH, TRANSFER_ENCODING},
         request::HttpRequest,
         response::{HttpResponse, ResponseBuilder},
         status::StatusCode,
     },
     rfc9112::{chunk::*, version::HTTP_11},
 };
-
-const CR: u8 = b'\r';
-const CRLF: [u8; 2] = [CR, LF];
-const LF: u8 = b'\n';
-const SP: u8 = b' ';
-
-const CRLF_CRLF: [u8; 4] = [CR, LF, CR, LF];
 
 /// Errors that can occur during the coroutine progression.
 #[derive(Debug, Error)]
@@ -46,15 +40,9 @@ pub enum Http11SendError {
     #[error("Parse HTTP response headers error: {0}")]
     ParseResponseHeaders(httparse::Error),
     #[error(transparent)]
-    SocketRead(#[from] SocketReadError),
-    #[error(transparent)]
-    HttpChunksRead(#[from] HttpChunksReadError),
-    #[error(transparent)]
-    SocketReadExact(#[from] SocketReadExactError),
-    #[error(transparent)]
-    SocketReadToEnd(#[from] SocketReadToEndError),
-    #[error(transparent)]
-    SocketWrite(#[from] SocketWriteError),
+    ReadChunks(#[from] Http11ReadChunksError),
+    #[error("Parse HTTP/1.1 response error: invalid content length `{0}`")]
+    InvalidContentLength(String),
 }
 
 /// Result returned by [`Http11Send::resume`].
@@ -69,6 +57,7 @@ pub enum Http11SendResult {
     Ok {
         /// The response received.
         response: HttpResponse,
+        remaining: Vec<u8>,
         /// Whether the server indicated the connection can be reused.
         ///
         /// When `false`, the caller must open a new connection before
@@ -107,46 +96,9 @@ pub enum Http11SendResult {
 #[derive(Debug)]
 enum State {
     /// Send the serialized request bytes.
-    WantsWrite(Vec<u8>),
-    Writing,
-
-    ReadingHeaders(Vec<u8>),
-    /// Receive response headers incrementally.
-    ReceiveHeaders {
-        read: SocketRead,
-        headers: Vec<u8>,
-    },
-
-    /// Receive the response body using chunked transfer coding.
-    ///
-    /// Used when the `Transfer-Encoding: chunked` response header is
-    /// present.
-    ///
-    /// Refs: <https://datatracker.ietf.org/doc/html/rfc9112#field.transfer-encoding>
-    ReceiveChunkedBody {
-        read: HttpChunksRead,
-        response: ResponseBuilder,
-    },
-
-    /// Receive a fixed-length response body.
-    ///
-    /// Used when the `Content-Length` response header is present and
-    /// valid.
-    ///
-    /// Refs: <https://datatracker.ietf.org/doc/html/rfc9112#body.content-length>
-    ReceiveLengthedBody {
-        read: SocketReadExact,
-        response: ResponseBuilder,
-    },
-
-    /// Receive the response body until EOF.
-    ///
-    /// Fallback when neither `Transfer-Encoding` nor `Content-Length`
-    /// is present or valid.
-    ReceiveBody {
-        read: SocketReadToEnd,
-        response: ResponseBuilder,
-    },
+    Headers,
+    ChunkedBody(Http11ReadChunks),
+    LengthedBody(usize),
 }
 
 /// I/O-free coroutine to send an HTTP/1.1 request and receive its response.
@@ -188,7 +140,11 @@ enum State {
 #[derive(Debug)]
 pub struct Http11Send {
     state: State,
+    wants_read: bool,
+    wants_write: Option<Vec<u8>>,
     is_conn_closed: bool,
+    buf: Vec<u8>,
+    response: ResponseBuilder,
 }
 
 impl Http11Send {
@@ -197,44 +153,13 @@ impl Http11Send {
     pub fn new(req: HttpRequest) -> Self {
         trace!("prepares HTTP/1.1 request to be sent: {req:?}");
 
-        let mut bytes = Vec::new();
-
-        bytes.extend(req.method.as_bytes());
-        bytes.push(SP);
-        bytes.extend(req.url.path().as_bytes());
-
-        if let Some(q) = req.url.query() {
-            bytes.extend(b"?");
-            bytes.extend(q.as_bytes());
-        }
-
-        bytes.push(SP);
-        bytes.extend(HTTP_11.as_bytes());
-        bytes.extend(CRLF);
-
-        for (key, val) in &req.headers {
-            // skip content-length, as it is automatically
-            // generated below
-            if key.eq_ignore_ascii_case(CONTENT_LENGTH) {
-                continue;
-            }
-
-            bytes.extend(key.as_bytes());
-            bytes.extend(b": ");
-            bytes.extend(val.as_bytes());
-            bytes.extend(CRLF);
-        }
-
-        let body_len = format!("{}", req.body.len());
-        bytes.extend(CONTENT_LENGTH.as_bytes());
-        bytes.extend(b": ");
-        bytes.extend(body_len.as_bytes());
-        bytes.extend(CRLF_CRLF);
-        bytes.extend(&req.body);
-
         Self {
-            state: State::WantsWrite(bytes),
+            state: State::Headers,
+            wants_read: false,
+            wants_write: Some(req.to_http_11_vec()),
             is_conn_closed: false,
+            buf: Vec::new(),
+            response: ResponseBuilder::default(),
         }
     }
 
@@ -244,49 +169,52 @@ impl Http11Send {
     /// [`SocketOutput`] returned by the runtime after processing the
     /// last emitted [`SocketInput`].
     pub fn resume(&mut self, arg: &[u8]) -> Http11SendResult {
+        if let Some(bytes) = self.wants_write.take() {
+            return Http11SendResult::WantsWrite(bytes);
+        }
+
+        self.buf.extend_from_slice(arg);
+
         loop {
-            match self.state {
-                State::WantsWrite(bytes) => {
-                    self.state = State::Writing;
-                    return Http11SendResult::WantsWrite(bytes);
-                }
-                State::Writing => {
-                    trace!("resumes after sending HTTP/1.1 request");
-                    self.state = State::ReadingHeaders(vec![]);
-                    return Http11SendResult::WantsRead;
-                }
-                State::ReadingHeaders(headers) => {
+            if self.wants_read {
+                self.wants_read = false;
+                return Http11SendResult::WantsRead;
+            }
+
+            match &mut self.state {
+                State::Headers => {
                     trace!("resumes after receiving partial HTTP/1.1 response headers");
-                    headers.extend_from_slice(arg);
 
-                    let mut buf = [EMPTY_HEADER; 64];
-                    let mut buf = Response::new(&mut buf);
+                    let mut headers = [EMPTY_HEADER; 64];
+                    let mut headers = Response::new(&mut headers);
 
-                    let n = match buf.parse(&headers) {
+                    let n = match headers.parse(&self.buf) {
                         Ok(Status::Complete(n)) => n,
-                        Ok(Status::Partial) => continue,
+                        Ok(Status::Partial) => {
+                            self.wants_read = true;
+                            continue;
+                        }
                         Err(err) => {
                             let err = Http11SendError::ParseResponseHeaders(err);
                             break Http11SendResult::Err(err);
                         }
                     };
 
-                    let mut response = ResponseBuilder::default();
                     let mut no_content = false;
 
-                    let is_http10 = matches!(buf.version, Some(0));
-                    response.version = if is_http10 { HTTP_10 } else { HTTP_11 }.into();
+                    let is_http10 = matches!(headers.version, Some(0));
+                    self.response.version = if is_http10 { HTTP_10 } else { HTTP_11 }.into();
 
-                    if let Some(code) = buf.code {
+                    if let Some(code) = headers.code {
                         no_content = code == 204 || code == 304;
-                        response.status = Some(StatusCode(code));
+                        self.response.status = Some(StatusCode(code));
                     }
 
-                    for header in buf.headers {
-                        response.header(header.name, header.value);
+                    for header in headers.headers {
+                        self.response.header(header.name, header.value);
                     }
 
-                    self.is_conn_closed = if let Some(conn) = response.get_header(ONNECTION) {
+                    self.is_conn_closed = if let Some(conn) = self.response.get_header(CONNECTION) {
                         conn.eq_ignore_ascii_case("close")
                     } else {
                         // HTTP/1.0 closes connections by default;
@@ -296,237 +224,165 @@ impl Http11Send {
 
                     if no_content {
                         break Http11SendResult::Ok {
-                            response: response.build(vec![]),
+                            response: mem::take(&mut self.response).build(Vec::new()),
+                            remaining: Vec::new(),
                             keep_alive: !self.is_conn_closed,
                         };
                     }
 
-                    let body: Vec<u8> = headers.drain(n..).collect();
+                    // remove headers from buffer, leaving pre-read
+                    // body in place
+                    self.buf.drain(..n);
 
-                    // Chunked transfer coding is HTTP/1.1 only (RFC
-                    // 9112 §7.1).
+                    // chunked transfer coding is HTTP/1.1 only
                     if !is_http10 {
-                        if let Some(enc) = response.get_header(TRANSFER_ENCODING) {
+                        if let Some(enc) = self.response.get_header(TRANSFER_ENCODING) {
                             if enc.eq_ignore_ascii_case("chunked") {
-                                let capacity = buf.capacity();
-                                let mut read = SocketRead::with_capacity(capacity);
-                                read.replace(buf);
-
-                                let mut read = HttpChunksRead::new(read);
-                                read.extend(body);
-
-                                self.state = State::ReceiveChunkedBody { read, response };
+                                self.state = State::ChunkedBody(Http11ReadChunks::default());
                                 continue;
                             }
                         }
                     }
 
-                    if let Some(len) = response.get_header(CONTENT_LENGTH) {
-                        if let Ok(len) = usize::from_str_radix(len.trim(), 10) {
-                            let mut read = SocketReadExact::new(len);
-                            read.extend(body);
-                            self.state = State::ReceiveLengthedBody { read, response };
-                            continue;
-                        }
-                    }
+                    if let Some(len) = self.response.get_header(CONTENT_LENGTH) {
+                        let len = len.trim();
 
-                    let mut read = SocketReadToEnd::new();
-                    read.extend(body);
-                    self.state = State::ReceiveBody { read, response };
-                }
-                State::ReceiveHeaders { read, headers } => {
-                    let (buf, n) = match read.resume(arg.take()) {
-                        SocketReadResult::Ok { buf, n } => (buf, n),
-                        SocketReadResult::Err { err } => {
-                            return Http11SendResult::Err { err: err.into() };
-                        }
-                        SocketReadResult::Io { input } => {
-                            return Http11SendResult::Io { input };
-                        }
-                        SocketReadResult::Eof => {
-                            return Http11SendResult::Err {
-                                err: Http11SendError::UnexpectedEof,
-                            };
-                        }
-                    };
-
-                    trace!("resume after receiving partial HTTP/1.1 response headers");
-
-                    headers.extend_from_slice(&buf[..n]);
-
-                    let mut parsed = [httparse::EMPTY_HEADER; 64];
-                    let mut parsed = httparse::Response::new(&mut parsed);
-
-                    let n = match parsed.parse(headers) {
-                        Ok(httparse::Status::Complete(n)) => n,
-                        Ok(httparse::Status::Partial) => {
-                            trace!(
-                                "received incomplete HTTP/1.1 response headers, need more bytes"
-                            );
-                            read.replace(buf);
-                            continue;
-                        }
-                        Err(err) => {
-                            return Http11SendResult::Err {
-                                err: Http11SendError::ParseResponseHeaders(err),
-                            };
-                        }
-                    };
-
-                    if log_enabled!(Level::Trace) {
-                        let h = String::from_utf8_lossy(&headers[..n]);
-                        trace!("HTTP/1.1 response headers:\n{h}");
-                    }
-
-                    let mut response = ResponseBuilder::default();
-                    let mut no_content = false;
-
-                    let is_http10 = matches!(parsed.version, Some(0));
-                    response.version = if is_http10 { HTTP_10 } else { HTTP_11 }.into();
-
-                    if let Some(code) = parsed.code {
-                        no_content = code == 204 || code == 304;
-                        response.status = Some(StatusCode(code));
-                    }
-
-                    for header in parsed.headers {
-                        response.header(header.name, header.value);
-                    }
-
-                    let body: Vec<u8> = headers.drain(n..).collect();
-
-                    if let Some(conn) = response.get_header(CONNECTION) {
-                        self.is_conn_closed = conn.eq_ignore_ascii_case("close");
-                    } else {
-                        // HTTP/1.0 closes connections by default;
-                        // HTTP/1.1 keeps them alive.
-                        self.is_conn_closed = is_http10;
-                    }
-
-                    if no_content {
-                        break Http11SendResult::Ok {
-                            request: self.request.take().unwrap(),
-                            response: response.build(vec![]),
-                            keep_alive: !self.is_conn_closed,
+                        let Ok(len) = usize::from_str_radix(len, 10) else {
+                            let err = Http11SendError::InvalidContentLength(len.to_owned());
+                            return Http11SendResult::Err(err);
                         };
+
+                        self.state = State::LengthedBody(len);
+                        continue;
                     }
 
-                    // Chunked transfer coding is HTTP/1.1 only (RFC
-                    // 9112 §7.1).
-                    if !is_http10 {
-                        if let Some(enc) = response.get_header(TRANSFER_ENCODING) {
-                            if enc.eq_ignore_ascii_case("chunked") {
-                                let capacity = buf.capacity();
-                                let mut read = SocketRead::with_capacity(capacity);
-                                read.replace(buf);
-
-                                let mut read = HttpChunksRead::new(read);
-                                read.extend(body);
-
-                                self.state = State::ReceiveChunkedBody { read, response };
-                                continue;
-                            }
+                    todo!("read until eof");
+                }
+                State::ChunkedBody(coroutine) => {
+                    match coroutine.resume(&self.buf) {
+                        Http11ReadChunksResult::Ok { body, remaining } => {
+                            return Http11SendResult::Ok {
+                                response: mem::take(&mut self.response).build(body),
+                                remaining,
+                                keep_alive: !self.is_conn_closed,
+                            };
                         }
-                    }
-
-                    if let Some(len) = response.get_header(CONTENT_LENGTH) {
-                        if let Ok(len) = usize::from_str_radix(len.trim(), 10) {
-                            let mut read = SocketReadExact::new(len);
-                            read.extend(body);
-                            self.state = State::ReceiveLengthedBody { read, response };
+                        Http11ReadChunksResult::WantsRead => {
+                            self.wants_read = true;
                             continue;
                         }
-                    }
-
-                    let mut read = SocketReadToEnd::new();
-                    read.extend(body);
-                    self.state = State::ReceiveBody { read, response };
-                }
-                State::ReceiveChunkedBody { read, response } => {
-                    let body = match read.resume(arg.take()) {
-                        HttpChunksReadResult::Ok { body } => body,
-                        HttpChunksReadResult::Err { err } => {
-                            return Http11SendResult::Err { err: err.into() };
-                        }
-                        HttpChunksReadResult::Io { input } => {
-                            return Http11SendResult::Io { input };
+                        Http11ReadChunksResult::Err(err) => {
+                            return Http11SendResult::Err(err.into());
                         }
                     };
-
-                    break finish(
-                        self.request.take().unwrap(),
-                        mem::take(response).build(body),
-                        !self.is_conn_closed,
-                    );
                 }
-                State::ReceiveLengthedBody { read, response } => {
-                    let body = match read.resume(arg.take()) {
-                        SocketReadExactResult::Ok { buf } => buf,
-                        SocketReadExactResult::Err { err } => {
-                            return Http11SendResult::Err { err: err.into() };
-                        }
-                        SocketReadExactResult::Io { input } => {
-                            return Http11SendResult::Io { input };
-                        }
-                    };
-
-                    break finish(
-                        self.request.take().unwrap(),
-                        mem::take(response).build(body),
-                        !self.is_conn_closed,
-                    );
+                State::LengthedBody(len) if *len > self.buf.len() => {
+                    self.wants_read = true;
                 }
-                State::ReceiveBody { read, response } => {
-                    let body = match read.resume(arg.take()) {
-                        SocketReadToEndResult::Ok { buf } => buf,
-                        SocketReadToEndResult::Err { err } => {
-                            return Http11SendResult::Err { err: err.into() };
-                        }
-                        SocketReadToEndResult::Io { input } => {
-                            return Http11SendResult::Io { input };
-                        }
-                    };
+                State::LengthedBody(len) => {
+                    let body = self.buf.drain(..*len).collect();
 
-                    break finish(
-                        self.request.take().unwrap(),
-                        mem::take(response).build(body),
-                        !self.is_conn_closed,
-                    );
+                    return Http11SendResult::Ok {
+                        response: mem::take(&mut self.response).build(body),
+                        remaining: mem::take(&mut self.buf),
+                        keep_alive: !self.is_conn_closed,
+                    };
                 }
             }
         }
     }
 }
 
-/// Converts a completed request/response pair into the appropriate
-/// [`Http11SendResult`].
-///
-/// If the response is a 3xx with a parseable `Location` header, emits
-/// [`Http11SendResult::Redirect`]; otherwise emits
-/// [`Http11SendResult::Ok`].
-fn finish(request: HttpRequest, response: HttpResponse, keep_alive: bool) -> Http11SendResult {
-    if response.status.is_redirection() {
-        if let Some(location) = response.header(LOCATION) {
-            if let Ok(url) = request.url.join(location) {
-                let same_scheme = request.url.scheme() == url.scheme();
-                let same_host =
-                    request.url.host() == url.host() && request.url.port() == url.port();
-                let same_origin = same_scheme && same_host;
+// fn finish(request_url: Url, response: HttpResponse, keep_alive: bool) -> Http11SendResult {
+//     if response.status.is_redirection() {
+//         if let Some(location) = response.header(LOCATION) {
+//             if let Ok(url) = request_url.join(location) {
+//                 let same_scheme = request_url.scheme() == url.scheme();
+//                 let same_host =
+//                     request_url.host() == url.host() && request_url.port() == url.port();
+//                 let same_origin = same_scheme && same_host;
 
-                return Http11SendResult::WantsRedirect {
-                    url,
-                    request,
+//                 return Http11SendResult::WantsRedirect {
+//                     url,
+//                     response,
+//                     keep_alive,
+//                     same_origin,
+//                 };
+//             }
+//         }
+//     }
+
+//     Http11SendResult::Ok {
+//         response,
+//         keep_alive,
+//     }
+// }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lengthed_body() {
+        let req = HttpRequest::get("https://example.com".try_into().unwrap());
+        let mut coroutine = Http11Send::new(req);
+        let mut buf: &[u8] = &[];
+
+        loop {
+            match coroutine.resume(buf) {
+                Http11SendResult::Ok {
                     response,
+                    remaining,
                     keep_alive,
-                    same_origin,
-                };
+                } => {
+                    assert_eq!("HTTP/1.1", response.version);
+                    assert_eq!(200, *response.status);
+                    assert_eq!(b"hello", &*response.body);
+                    assert_eq!(0, remaining.len());
+                    assert_eq!(true, keep_alive);
+                    break;
+                }
+                Http11SendResult::WantsWrite(bytes) => {
+                    assert_eq!(bytes, b"GET / HTTP/1.1\r\ncontent-length: 0\r\n\r\n");
+                }
+                Http11SendResult::WantsRead => {
+                    buf = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+                }
+                Http11SendResult::WantsRedirect { .. } => unreachable!("wants redirect"),
+                Http11SendResult::Err(err) => unreachable!("{err}"),
             }
         }
     }
 
-    Http11SendResult::Ok {
-        request,
-        response,
-        keep_alive,
+    #[test]
+    fn chunked_body() {
+        let req = HttpRequest::get("https://example.com".try_into().unwrap());
+        let mut coroutine = Http11Send::new(req);
+        let mut buf: &[u8] = &[];
+
+        loop {
+            match coroutine.resume(buf) {
+                Http11SendResult::Ok {
+                    response,
+                    remaining,
+                    keep_alive,
+                } => {
+                    assert_eq!("HTTP/1.1", response.version);
+                    assert_eq!(200, *response.status);
+                    assert_eq!(b"hello world", &*response.body);
+                    assert_eq!(0, remaining.len());
+                    assert_eq!(true, keep_alive);
+                    break;
+                }
+                Http11SendResult::WantsWrite(bytes) => {
+                    assert_eq!(bytes, b"GET / HTTP/1.1\r\ncontent-length: 0\r\n\r\n");
+                }
+                Http11SendResult::WantsRead => {
+                    buf = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+                }
+                Http11SendResult::WantsRedirect { .. } => unreachable!("wants redirect"),
+                Http11SendResult::Err(err) => unreachable!("{err}"),
+            }
+        }
     }
 }

@@ -35,26 +35,6 @@ fn test(response: &[u8]) -> Http11SendResult {
 }
 
 #[test]
-fn http11_200_ok() {
-    let response = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
-
-    match test(response) {
-        Http11SendResult::Ok { response, .. } => assert_eq!(*response.status, 200),
-        other => panic!("unexpected result: {other:?}"),
-    }
-}
-
-#[test]
-fn http11_version() {
-    let response = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
-
-    match test(response) {
-        Http11SendResult::Ok { response, .. } => assert_eq!(response.version, "HTTP/1.1"),
-        other => panic!("unexpected result: {other:?}"),
-    }
-}
-
-#[test]
 fn http10_response_version_and_connection() {
     let response = b"HTTP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n";
 

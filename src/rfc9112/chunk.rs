@@ -30,7 +30,7 @@ use log::trace;
 use memchr::memmem;
 use thiserror::Error;
 
-const CRLF: [u8; 2] = [b'\r', b'\n'];
+use crate::rfc9110::chars::CRLF;
 
 /// Errors that can occur during the coroutine progression.
 #[derive(Debug, Error)]
@@ -191,11 +191,6 @@ mod tests {
     }
 
     #[test]
-    fn chunk_size_ext() {
-        test("5;ext\r\nHello\r\n0\r\n\r\n", "Hello");
-    }
-
-    #[test]
     fn incomplete_chunk_data() {
         let mut coroutine = Http11ReadChunks::default();
         let mut buf: &[u8] = b"5\r\nHell";
@@ -211,6 +206,21 @@ mod tests {
                 Http11ReadChunksResult::Err(err) => unreachable!("{err}"),
             }
         }
+    }
+
+    #[test]
+    fn single() {
+        test("5\r\nhello\r\n0\r\n\r\n", "hello");
+    }
+
+    #[test]
+    fn empty_body() {
+        test("0\r\n\r\n", "");
+    }
+
+    #[test]
+    fn ignored_extension() {
+        test("5;ext\r\nHello\r\n0\r\n\r\n", "Hello");
     }
 
     /// Test case from the Russian Wikipedia page on chunked transfer
@@ -238,7 +248,7 @@ mod tests {
     ///
     /// https://fr.wikipedia.org/wiki/Chunked_transfer_encoding
     #[test]
-    fn chunks_wiki_fr() {
+    fn wiki_fr() {
         let encoded = concat!(
             "27\r\n",
             "Voici les données du premier morceau\r\n\r\n",
@@ -266,19 +276,9 @@ mod tests {
     ///
     /// https://github.com/frewsxcv/rust-chunked-transfer/blob/main/src/decoder.rs
     #[test]
-    fn chunks_github_frewsxcv() {
+    fn github_frewsxcv() {
         let encoded = "3\r\nhel\r\nb\r\nlo world!!!\r\n0\r\n\r\n";
         let decoded = "hello world!!!";
         test(encoded, decoded);
-    }
-
-    #[test]
-    fn chunks_single() {
-        test("5\r\nhello\r\n0\r\n\r\n", "hello");
-    }
-
-    #[test]
-    fn chunks_empty_body() {
-        test("0\r\n\r\n", "");
     }
 }
