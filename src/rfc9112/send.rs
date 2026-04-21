@@ -35,14 +35,14 @@ use crate::{
 /// Errors that can occur during the coroutine progression.
 #[derive(Debug, Error)]
 pub enum Http11SendError {
-    #[error("Received unexpected EOF")]
-    UnexpectedEof,
+    #[error("Reached unexpected EOF")]
+    Eof,
     #[error("Parse HTTP response headers error: {0}")]
     ParseResponseHeaders(httparse::Error),
-    #[error(transparent)]
-    ReadChunks(#[from] Http11ReadChunksError),
     #[error("Parse HTTP/1.1 response error: invalid content length `{0}`")]
     InvalidContentLength(String),
+    #[error(transparent)]
+    ReadChunks(#[from] Http11ReadChunksError),
 }
 
 /// Result returned by [`Http11Send::resume`].
@@ -97,8 +97,9 @@ pub enum Http11SendResult {
 enum State {
     /// Send the serialized request bytes.
     Headers,
-    ChunkedBody(Http11ReadChunks),
-    LengthedBody(usize),
+    BodyChunks(Http11ReadChunks),
+    BodyLength(usize),
+    BodyEof,
 }
 
 /// I/O-free coroutine to send an HTTP/1.1 request and receive its response.
@@ -140,11 +141,12 @@ enum State {
 #[derive(Debug)]
 pub struct Http11Send {
     state: State,
-    wants_read: bool,
+    wants_read: Option<bool>,
     wants_write: Option<Vec<u8>>,
     is_conn_closed: bool,
     buf: Vec<u8>,
     response: ResponseBuilder,
+    eof: bool,
 }
 
 impl Http11Send {
@@ -155,11 +157,12 @@ impl Http11Send {
 
         Self {
             state: State::Headers,
-            wants_read: false,
+            wants_read: None,
             wants_write: Some(req.to_http_11_vec()),
             is_conn_closed: false,
             buf: Vec::new(),
             response: ResponseBuilder::default(),
+            eof: false,
         }
     }
 
@@ -176,9 +179,13 @@ impl Http11Send {
         self.buf.extend_from_slice(arg);
 
         loop {
-            if self.wants_read {
-                self.wants_read = false;
-                return Http11SendResult::WantsRead;
+            if let Some(wants_read) = self.wants_read.take() {
+                if wants_read {
+                    self.wants_read = Some(false);
+                    return Http11SendResult::WantsRead;
+                }
+
+                self.eof = arg.is_empty();
             }
 
             match &mut self.state {
@@ -190,8 +197,12 @@ impl Http11Send {
 
                     let n = match headers.parse(&self.buf) {
                         Ok(Status::Complete(n)) => n,
+                        Ok(Status::Partial) if self.eof => {
+                            let err = Http11SendError::Eof;
+                            break Http11SendResult::Err(err);
+                        }
                         Ok(Status::Partial) => {
-                            self.wants_read = true;
+                            self.wants_read = Some(true);
                             continue;
                         }
                         Err(err) => {
@@ -238,7 +249,7 @@ impl Http11Send {
                     if !is_http10 {
                         if let Some(enc) = self.response.get_header(TRANSFER_ENCODING) {
                             if enc.eq_ignore_ascii_case("chunked") {
-                                self.state = State::ChunkedBody(Http11ReadChunks::default());
+                                self.state = State::BodyChunks(Http11ReadChunks::default());
                                 continue;
                             }
                         }
@@ -252,34 +263,31 @@ impl Http11Send {
                             return Http11SendResult::Err(err);
                         };
 
-                        self.state = State::LengthedBody(len);
+                        self.state = State::BodyLength(len);
                         continue;
                     }
 
-                    todo!("read until eof");
+                    self.state = State::BodyEof;
                 }
-                State::ChunkedBody(coroutine) => {
-                    match coroutine.resume(&self.buf) {
-                        Http11ReadChunksResult::Ok { body, remaining } => {
-                            return Http11SendResult::Ok {
-                                response: mem::take(&mut self.response).build(body),
-                                remaining,
-                                keep_alive: !self.is_conn_closed,
-                            };
-                        }
-                        Http11ReadChunksResult::WantsRead => {
-                            self.wants_read = true;
-                            continue;
-                        }
-                        Http11ReadChunksResult::Err(err) => {
-                            return Http11SendResult::Err(err.into());
-                        }
-                    };
+                State::BodyChunks(c) => match c.resume(&self.buf) {
+                    Http11ReadChunksResult::Ok { body, remaining } => {
+                        return Http11SendResult::Ok {
+                            response: mem::take(&mut self.response).build(body),
+                            remaining,
+                            keep_alive: !self.is_conn_closed,
+                        };
+                    }
+                    Http11ReadChunksResult::WantsRead => {
+                        self.wants_read = Some(true);
+                    }
+                    Http11ReadChunksResult::Err(err) => {
+                        return Http11SendResult::Err(err.into());
+                    }
+                },
+                State::BodyLength(len) if *len > self.buf.len() => {
+                    self.wants_read = Some(true);
                 }
-                State::LengthedBody(len) if *len > self.buf.len() => {
-                    self.wants_read = true;
-                }
-                State::LengthedBody(len) => {
+                State::BodyLength(len) => {
                     let body = self.buf.drain(..*len).collect();
 
                     return Http11SendResult::Ok {
@@ -287,6 +295,19 @@ impl Http11Send {
                         remaining: mem::take(&mut self.buf),
                         keep_alive: !self.is_conn_closed,
                     };
+                }
+                State::BodyEof if self.eof => {
+                    let body = mem::take(&mut self.buf);
+                    let response = mem::take(&mut self.response);
+
+                    return Http11SendResult::Ok {
+                        response: response.build(body),
+                        remaining: Vec::new(),
+                        keep_alive: !self.is_conn_closed,
+                    };
+                }
+                State::BodyEof => {
+                    self.wants_read = Some(true);
                 }
             }
         }
@@ -323,7 +344,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lengthed_body() {
+    fn body_chunks() {
+        let req = HttpRequest::get("https://example.com".try_into().unwrap());
+        let mut coroutine = Http11Send::new(req);
+        let mut buf: &[u8] = &[];
+
+        loop {
+            match coroutine.resume(buf) {
+                Http11SendResult::Ok {
+                    response,
+                    remaining,
+                    keep_alive,
+                } => {
+                    assert_eq!("HTTP/1.1", response.version);
+                    assert_eq!(200, *response.status);
+                    assert_eq!(b"hello world", &*response.body);
+                    assert_eq!(0, remaining.len());
+                    assert_eq!(true, keep_alive);
+                    break;
+                }
+                Http11SendResult::WantsWrite(bytes) => {
+                    assert_eq!(bytes, b"GET / HTTP/1.1\r\ncontent-length: 0\r\n\r\n");
+                }
+                Http11SendResult::WantsRead => {
+                    buf = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+                }
+                Http11SendResult::WantsRedirect { .. } => unreachable!("wants redirect"),
+                Http11SendResult::Err(err) => unreachable!("{err}"),
+            }
+        }
+    }
+
+    #[test]
+    fn body_length() {
         let req = HttpRequest::get("https://example.com".try_into().unwrap());
         let mut coroutine = Http11Send::new(req);
         let mut buf: &[u8] = &[];
@@ -355,10 +408,11 @@ mod tests {
     }
 
     #[test]
-    fn chunked_body() {
+    fn body_eof() {
         let req = HttpRequest::get("https://example.com".try_into().unwrap());
         let mut coroutine = Http11Send::new(req);
         let mut buf: &[u8] = &[];
+        let mut count = 0;
 
         loop {
             match coroutine.resume(buf) {
@@ -377,8 +431,16 @@ mod tests {
                 Http11SendResult::WantsWrite(bytes) => {
                     assert_eq!(bytes, b"GET / HTTP/1.1\r\ncontent-length: 0\r\n\r\n");
                 }
+                Http11SendResult::WantsRead if count == 0 => {
+                    count = 1;
+                    buf = b"HTTP/1.1 200 OK\r\n\r\nhello ";
+                }
+                Http11SendResult::WantsRead if count == 1 => {
+                    count = 2;
+                    buf = b"world";
+                }
                 Http11SendResult::WantsRead => {
-                    buf = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+                    buf = b"";
                 }
                 Http11SendResult::WantsRedirect { .. } => unreachable!("wants redirect"),
                 Http11SendResult::Err(err) => unreachable!("{err}"),
