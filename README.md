@@ -1,6 +1,6 @@
 # I/O HTTP [![Documentation](https://img.shields.io/docsrs/io-http?style=flat&logo=docs.rs&logoColor=white)](https://docs.rs/io-http/latest/io_http) [![Matrix](https://img.shields.io/badge/chat-%23pimalaya-blue?style=flat&logo=matrix&logoColor=white)](https://matrix.to/#/#pimalaya:matrix.org) [![Mastodon](https://img.shields.io/badge/news-%40pimalaya-blue?style=flat&logo=mastodon&logoColor=white)](https://fosstodon.org/@pimalaya)
 
-**I/O-free** HTTP/1.X client library written in Rust, based on [io-socket](https://github.com/pimalaya/io-socket)
+**I/O-free** HTTP/1.X client library written in Rust
 
 ## Table of contents
 
@@ -38,11 +38,14 @@ This library implements HTTP as I/O-agnostic coroutines — no sockets, no async
 ### Send an HTTPS/1.1 request via rustls (blocking)
 
 ```rust,ignore
-use std::{net::TcpStream, sync::Arc};
+use std::{
+    io::{Read, Write},
+    net::TcpStream,
+    sync::Arc,
+};
 
 use io_http::rfc9110::request::HttpRequest;
 use io_http::rfc9112::send::{Http11Send, Http11SendResult};
-use io_socket::runtimes::std_stream::handle;
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
 use rustls_platform_verifier::ConfigVerifierExt;
 use url::Url;
@@ -60,22 +63,27 @@ let request = HttpRequest::get(url)
     .header("Host", domain)
     .header("Connection", "close");
 
-let mut arg = None;
 let mut send = Http11Send::new(request);
+let mut arg: Option<&[u8]> = None;
+let mut buf = [0u8; 4096];
 
 let response = loop {
     match send.resume(arg.take()) {
         Http11SendResult::Ok { response, .. } => break response,
-        Http11SendResult::Redirect { url, .. } => { /* follow redirect */ break todo!() }
-        Http11SendResult::Err { err } => panic!("{err}"),
-        Http11SendResult::Io { input } => arg = Some(handle(&mut tls, input).unwrap()),
+        Http11SendResult::WantsRedirect { url, .. } => { /* follow redirect */ break todo!() }
+        Http11SendResult::Err(err) => panic!("{err}"),
+        Http11SendResult::WantsRead => {
+            let n = tls.read(&mut buf).unwrap();
+            arg = Some(&buf[..n]);
+        }
+        Http11SendResult::WantsWrite(bytes) => tls.write_all(&bytes).unwrap(),
     }
 };
 
 println!("{} {}", response.version, *response.status);
 ```
 
-*See complete example at [./examples/send.rs](https://github.com/pimalaya/io-http/blob/master/examples/send.rs).*
+*See complete example at [./examples/std_http10.rs](https://github.com/pimalaya/io-http/blob/master/examples/std_http10.rs).*
 
 ### Discover a `.well-known` endpoint via Tokio (async)
 
@@ -83,10 +91,12 @@ println!("{} {}", response.version, *response.status);
 use std::sync::Arc;
 
 use io_http::rfc8615::well_known::{WellKnown, WellKnownResult};
-use io_socket::runtimes::tokio_stream::handle;
-use rustls::{ClientConfig, ClientConnection};
+use rustls::ClientConfig;
 use rustls_platform_verifier::ConfigVerifierExt;
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 use tokio_rustls::TlsConnector;
 
 #[tokio::main]
@@ -101,7 +111,8 @@ async fn main() {
     let mut tls = connector.connect(server_name, tcp).await.unwrap();
 
     let mut well_known = WellKnown::new(request);
-    let mut arg = None;
+    let mut arg: Option<&[u8]> = None;
+    let mut buf = [0u8; 4096];
 
     loop {
         match well_known.resume(arg.take()) {
@@ -112,10 +123,12 @@ async fn main() {
             WellKnownResult::Ok { response, .. } => {
                 panic!("expected redirect, got {}", *response.status);
             }
-            WellKnownResult::Err { err } => panic!("{err}"),
-            WellKnownResult::Io { input } => {
-                arg = Some(handle(&mut tls, input).await.unwrap());
+            WellKnownResult::Err(err) => panic!("{err}"),
+            WellKnownResult::WantsRead => {
+                let n = tls.read(&mut buf).await.unwrap();
+                arg = Some(&buf[..n]);
             }
+            WellKnownResult::WantsWrite(bytes) => tls.write_all(&bytes).await.unwrap(),
         }
     }
 }

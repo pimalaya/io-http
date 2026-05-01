@@ -12,5 +12,6 @@
 //! - Connections close after each request by default
 //! - `Host` header is not mandatory
 
+pub mod request;
 pub mod send;
 pub mod version;

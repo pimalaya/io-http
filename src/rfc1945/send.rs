@@ -1,10 +1,10 @@
-//! I/O-free coroutine to send an HTTP request and receive its response
-//! (RFC 1945).
+//! I/O-free coroutine to send an HTTP request and receive its
+//! response (RFC 1945).
 //!
-//! The coroutine serializes the request, writes it to the socket,
-//! then reads and parses the response headers and body. Two
-//! body-reading strategies are supported, selected automatically from
-//! the response headers:
+//! The coroutine serializes the request, hands the caller the bytes
+//! to write, then collects bytes from the caller until the response
+//! headers and body are complete. Two body-reading strategies are
+//! supported, selected automatically from the response headers:
 //!
 //! | Strategy     | Trigger               |
 //! |--------------|-----------------------|
@@ -12,17 +12,15 @@
 //! | Read-to-EOF  | Header absent         |
 //!
 //! Unlike HTTP/1.1, chunked transfer encoding is not defined in RFC
-//! 1945.  Connections always close after each response unless the
+//! 1945. Connections always close after each response unless the
 //! server sends the non-standard `Connection: keep-alive` header.
 
-use alloc::{format, string::String, vec, vec::Vec};
 use core::mem;
 
-use io_socket::{
-    coroutines::{read::*, read_exact::*, read_to_end::*, write::*},
-    io::{SocketInput, SocketOutput},
-};
-use log::{Level, info, log_enabled, trace};
+use alloc::{borrow::ToOwned, string::String, vec::Vec};
+
+use httparse::{EMPTY_HEADER, Response, Status};
+use log::trace;
 use thiserror::Error;
 use url::Url;
 
@@ -36,31 +34,15 @@ use crate::{
     },
 };
 
-const CR: u8 = b'\r';
-const CRLF: [u8; 2] = [CR, LF];
-const LF: u8 = b'\n';
-const SP: u8 = b' ';
-
-const CRLF_CRLF: [u8; 4] = [CR, LF, CR, LF];
-
 /// Errors that can occur during the coroutine progression.
 #[derive(Debug, Error)]
 pub enum Http10SendError {
-    /// The coroutine unexpectedly reached the End Of File.
-    #[error("Received unexpected EOF")]
-    UnexpectedEof,
-    /// The HTTP response headers could not be parsed.
+    #[error("Reached unexpected EOF")]
+    Eof,
     #[error("Parse HTTP response headers error: {0}")]
     ParseResponseHeaders(httparse::Error),
-
-    #[error(transparent)]
-    SocketRead(#[from] SocketReadError),
-    #[error(transparent)]
-    SocketReadExact(#[from] SocketReadExactError),
-    #[error(transparent)]
-    SocketReadToEnd(#[from] SocketReadToEndError),
-    #[error(transparent)]
-    SocketWrite(#[from] SocketWriteError),
+    #[error("Parse HTTP/1.0 response error: invalid content length `{0}`")]
+    InvalidContentLength(String),
 }
 
 /// Result returned by [`Http10Send::resume`].
@@ -73,10 +55,11 @@ pub enum Http10SendResult {
     /// unparseable also arrives here — the caller can inspect
     /// `response.status` if needed.
     Ok {
-        /// The request that was sent.
-        request: HttpRequest,
         /// The response received.
         response: HttpResponse,
+        /// Bytes left in the buffer after the body — typically empty
+        /// for HTTP/1.0 (connection closes by default).
+        remaining: Vec<u8>,
         /// Whether the server indicated the connection can be reused.
         ///
         /// HTTP/1.0 closes connections by default; this is `true`
@@ -85,19 +68,21 @@ pub enum Http10SendResult {
         keep_alive: bool,
     },
 
-    /// The coroutine needs a socket I/O to be performed.
-    Io { input: SocketInput },
+    /// The coroutine needs more bytes to be read from the socket.
+    WantsRead,
+
+    /// The coroutine wants the given bytes to be written to the
+    /// socket.
+    WantsWrite(Vec<u8>),
 
     /// The server responded with a 3xx redirect.
     ///
     /// The caller should create a new [`Http10Send`] targeting `url`.
     /// When `!keep_alive || !same_origin`, a new connection must be
     /// opened before sending the next request.
-    Redirect {
+    WantsRedirect {
         /// Resolved redirect target URL (from the `Location` header).
         url: Url,
-        /// The request that triggered this redirect.
-        request: HttpRequest,
         /// The 3xx response received.
         response: HttpResponse,
         /// Whether the server indicated it will keep the connection
@@ -105,43 +90,25 @@ pub enum Http10SendResult {
         keep_alive: bool,
         /// Whether the redirect stays on the same scheme, host, and
         /// port.
+        ///
+        /// When `false`, forwarding credentials to the new host
+        /// without user consent is inadvisable (RFC 9110 §15.4).
         same_origin: bool,
     },
 
     /// The coroutine encountered an error.
-    Err { err: Http10SendError },
+    Err(Http10SendError),
 }
 
 /// Internal state of the [`Http10Send`] coroutine.
 #[derive(Debug)]
 enum State {
-    /// Serialize the request into bytes.
-    Serialize,
-
-    /// Send the serialized request bytes.
-    Send(SocketWrite),
-
     /// Receive response headers incrementally.
-    ReceiveHeaders { read: SocketRead, headers: Vec<u8> },
-
+    Headers,
     /// Receive a fixed-length response body.
-    ///
-    /// Used when the `Content-Length` response header is present and
-    /// valid.
-    ///
-    /// Refs: <https://datatracker.ietf.org/doc/html/rfc1945#section-10.4>
-    ReceiveLengthedBody {
-        read: SocketReadExact,
-        response: ResponseBuilder,
-    },
-
+    BodyLength(usize),
     /// Receive the response body until EOF.
-    ///
-    /// Fallback when `Content-Length` is absent or invalid.
-    ReceiveBody {
-        read: SocketReadToEnd,
-        response: ResponseBuilder,
-    },
+    BodyEof,
 }
 
 /// I/O-free coroutine to send an HTTP/1.0 request and receive its response.
@@ -149,10 +116,9 @@ enum State {
 /// # Example
 ///
 /// ```rust,ignore
-/// use std::net::TcpStream;
+/// use std::{io::{Read, Write}, net::TcpStream};
 /// use io_http::rfc1945::send::{Http10Send, Http10SendResult};
 /// use io_http::rfc9110::request::HttpRequest;
-/// use io_socket::runtimes::std_stream::handle;
 /// use url::Url;
 ///
 /// let url = Url::parse("http://example.com/").unwrap();
@@ -161,19 +127,21 @@ enum State {
 ///
 /// let mut stream = TcpStream::connect("example.com:80").unwrap();
 /// let mut send = Http10Send::new(request);
-/// let mut arg = None;
+/// let mut arg: Option<&[u8]> = None;
+/// let mut buf = [0u8; 4096];
 ///
-/// let response = 'outer: loop {
+/// let response = loop {
 ///     match send.resume(arg.take()) {
 ///         Http10SendResult::Ok { response, .. } => break response,
-///         Http10SendResult::Err { err } => panic!("{err}"),
-///         Http10SendResult::Io { input } => arg = Some(handle(&mut stream, input).unwrap()),
-///         Http10SendResult::Redirect { url: new_url, keep_alive, same_origin, .. } => {
-///             if !keep_alive || !same_origin {
-///                 stream = TcpStream::connect(new_url.host_str().unwrap()).unwrap();
-///             }
-///             send = Http10Send::new(HttpRequest::get(new_url));
+///         Http10SendResult::Err(err) => panic!("{err}"),
+///         Http10SendResult::WantsWrite(bytes) => {
+///             stream.write_all(&bytes).unwrap();
 ///         }
+///         Http10SendResult::WantsRead => {
+///             let n = stream.read(&mut buf).unwrap();
+///             arg = Some(&buf[..n]);
+///         }
+///         Http10SendResult::WantsRedirect { .. } => unimplemented!(),
 ///     }
 /// };
 ///
@@ -181,252 +149,292 @@ enum State {
 /// ```
 #[derive(Debug)]
 pub struct Http10Send {
-    // Stored as Option because Url is not Default, so we cannot use
-    // mem::take on HttpRequest directly. The value is Some for the
-    // entire lifetime of the coroutine and taken exactly once in the
-    // terminal states.
-    request: Option<HttpRequest>,
+    request_url: Url,
     state: State,
+    wants_read: bool,
+    wants_write: Option<Vec<u8>>,
     keep_alive: bool,
+    buf: Vec<u8>,
+    response: ResponseBuilder,
 }
 
 impl Http10Send {
     /// Creates a new coroutine that will send the given request and
     /// receive its response.
-    pub fn new(request: HttpRequest) -> Self {
+    pub fn new(req: HttpRequest) -> Self {
+        trace!("prepares HTTP/1.0 request to be sent: {req:?}");
+
+        let request_url = req.url.clone();
+        let bytes = req.to_http_10_vec();
+
         Self {
-            request: Some(request),
-            state: State::Serialize,
+            request_url,
+            state: State::Headers,
+            wants_read: false,
+            wants_write: Some(bytes),
             keep_alive: false,
+            buf: Vec::new(),
+            response: ResponseBuilder::default(),
         }
     }
 
     /// Advances the coroutine.
     ///
-    /// Pass `None` on the first call. On subsequent calls, pass the
-    /// [`SocketOutput`] returned by the runtime after processing the
-    /// last emitted [`SocketInput`].
-    pub fn resume(&mut self, mut arg: Option<SocketOutput>) -> Http10SendResult {
-        if arg.is_none() {
-            info!("send HTTP/1.0 request");
-        }
-
+    /// Pass [`None`] when there is no data to provide (initial call,
+    /// after a write). Pass `Some(data)` with bytes read from the
+    /// socket after a [`Http10SendResult::WantsRead`]. Pass `Some(&[])`
+    /// to signal EOF.
+    pub fn resume(&mut self, mut arg: Option<&[u8]>) -> Http10SendResult {
         loop {
+            if let Some(bytes) = self.wants_write.take() {
+                return Http10SendResult::WantsWrite(bytes);
+            }
+
+            if mem::take(&mut self.wants_read) {
+                return Http10SendResult::WantsRead;
+            }
+
             match &mut self.state {
-                State::Serialize => {
-                    let req = self.request.as_ref().unwrap();
-                    trace!("HTTP/1.0 request: {req:?}");
+                State::Headers => {
+                    trace!("state: headers");
 
-                    let mut bytes = Vec::new();
-
-                    bytes.extend(req.method.as_bytes());
-                    bytes.push(SP);
-                    bytes.extend(req.url.path().as_bytes());
-
-                    if let Some(q) = req.url.query() {
-                        bytes.extend(b"?");
-                        bytes.extend(q.as_bytes());
+                    match arg.take() {
+                        Some(&[]) => break Http10SendResult::Err(Http10SendError::Eof),
+                        Some(data) => self.buf.extend_from_slice(data),
+                        None => {}
                     }
 
-                    bytes.push(SP);
-                    bytes.extend(HTTP_10.as_bytes());
-                    bytes.extend(CRLF);
+                    let mut headers = [EMPTY_HEADER; 64];
+                    let mut headers = Response::new(&mut headers);
 
-                    for (key, val) in &req.headers {
-                        // skip content-length, as it is automatically
-                        // generated below
-                        if key.eq_ignore_ascii_case(CONTENT_LENGTH) {
-                            continue;
-                        }
-
-                        bytes.extend(key.as_bytes());
-                        bytes.extend(b": ");
-                        bytes.extend(val.as_bytes());
-                        bytes.extend(CRLF);
-                    }
-
-                    let body_len = format!("{}", req.body.len());
-                    bytes.extend(CONTENT_LENGTH.as_bytes());
-                    bytes.extend(b": ");
-                    bytes.extend(body_len.as_bytes());
-                    bytes.extend(CRLF_CRLF);
-                    bytes.extend(&req.body);
-
-                    self.state = State::Send(SocketWrite::new(bytes));
-                }
-                State::Send(write) => {
-                    match write.resume(arg.take()) {
-                        SocketWriteResult::Ok { .. } => (),
-                        SocketWriteResult::Err { err } => {
-                            return Http10SendResult::Err { err: err.into() };
-                        }
-                        SocketWriteResult::Io { input } => {
-                            return Http10SendResult::Io { input };
-                        }
-                        SocketWriteResult::Eof => {
-                            return Http10SendResult::Err {
-                                err: Http10SendError::UnexpectedEof,
-                            };
-                        }
-                    };
-
-                    trace!("resume after sending HTTP/1.0 request");
-
-                    self.state = State::ReceiveHeaders {
-                        read: SocketRead::default(),
-                        headers: Vec::new(),
-                    };
-                }
-                State::ReceiveHeaders { read, headers } => {
-                    let (buf, n) = match read.resume(arg.take()) {
-                        SocketReadResult::Ok { buf, n } => (buf, n),
-                        SocketReadResult::Err { err } => {
-                            return Http10SendResult::Err { err: err.into() };
-                        }
-                        SocketReadResult::Io { input } => {
-                            return Http10SendResult::Io { input };
-                        }
-                        SocketReadResult::Eof => {
-                            return Http10SendResult::Err {
-                                err: Http10SendError::UnexpectedEof,
-                            };
-                        }
-                    };
-
-                    trace!("resume after receiving partial HTTP/1.0 response headers");
-
-                    headers.extend_from_slice(&buf[..n]);
-
-                    let mut parsed = [httparse::EMPTY_HEADER; 64];
-                    let mut parsed = httparse::Response::new(&mut parsed);
-
-                    let n = match parsed.parse(headers) {
-                        Ok(httparse::Status::Complete(n)) => n,
-                        Ok(httparse::Status::Partial) => {
-                            trace!(
-                                "received incomplete HTTP/1.0 response headers, need more bytes"
-                            );
-                            read.replace(buf);
+                    let n = match headers.parse(&self.buf) {
+                        Ok(Status::Complete(n)) => n,
+                        Ok(Status::Partial) => {
+                            trace!("received incomplete headers");
+                            self.wants_read = true;
                             continue;
                         }
                         Err(err) => {
-                            return Http10SendResult::Err {
-                                err: Http10SendError::ParseResponseHeaders(err),
-                            };
+                            let err = Http10SendError::ParseResponseHeaders(err);
+                            break Http10SendResult::Err(err);
                         }
                     };
 
-                    if log_enabled!(Level::Trace) {
-                        let h = String::from_utf8_lossy(&headers[..n]);
-                        trace!("HTTP/1.0 response headers:\n{h}");
-                    }
-
-                    let mut response = ResponseBuilder::default();
-                    response.version = HTTP_10.into();
                     let mut no_content = false;
+                    self.response.version = HTTP_10.into();
 
-                    if let Some(code) = parsed.code {
+                    if let Some(code) = headers.code {
                         no_content = code == 204 || code == 304;
-                        response.status = Some(StatusCode(code));
+                        self.response.status = Some(StatusCode(code));
                     }
 
-                    for header in parsed.headers {
-                        response.header(header.name, header.value);
+                    for header in headers.headers {
+                        self.response.header(header.name, header.value);
                     }
 
-                    let body: Vec<u8> = headers.drain(n..).collect();
+                    // HTTP/1.0 closes connections by default; only
+                    // honor a non-standard `Connection: keep-alive`.
+                    self.keep_alive = self
+                        .response
+                        .get_header(CONNECTION)
+                        .is_some_and(|conn| conn.eq_ignore_ascii_case("keep-alive"));
 
-                    if let Some(conn) = response.get_header(CONNECTION) {
-                        self.keep_alive = conn.eq_ignore_ascii_case("keep-alive");
-                    }
+                    trace!("received complete headers: {:?}", self.response);
 
                     if no_content {
-                        break Http10SendResult::Ok {
-                            request: self.request.take().unwrap(),
-                            response: response.build(vec![]),
-                            keep_alive: self.keep_alive,
+                        let response = mem::take(&mut self.response).build(Vec::new());
+                        break self.finish(response, Vec::new());
+                    }
+
+                    // remove headers from buffer, leaving pre-read body in place
+                    self.buf.drain(..n);
+
+                    if let Some(len) = self.response.get_header(CONTENT_LENGTH) {
+                        let len = len.trim();
+
+                        let Ok(len) = usize::from_str_radix(len, 10) else {
+                            let err = Http10SendError::InvalidContentLength(len.to_owned());
+                            return Http10SendResult::Err(err);
                         };
+
+                        self.state = State::BodyLength(len);
+                        continue;
                     }
 
-                    if let Some(len) = response.get_header(CONTENT_LENGTH) {
-                        if let Ok(len) = usize::from_str_radix(len.trim(), 10) {
-                            let mut read = SocketReadExact::new(len);
-                            read.extend(body);
-                            self.state = State::ReceiveLengthedBody { read, response };
-                            continue;
-                        }
+                    self.state = State::BodyEof;
+                }
+                State::BodyLength(len) => {
+                    trace!("state: body length");
+
+                    if let Some(data) = arg.take() {
+                        self.buf.extend_from_slice(data);
                     }
 
-                    let mut read = SocketReadToEnd::new();
-                    read.extend(body);
-                    self.state = State::ReceiveBody { read, response };
+                    if *len > self.buf.len() {
+                        trace!("received incomplete body {len}/{}", self.buf.len());
+                        self.wants_read = true;
+                    } else {
+                        let body = self.buf.drain(..*len).collect();
+                        let remaining = mem::take(&mut self.buf);
+                        let response = mem::take(&mut self.response).build(body);
+                        return self.finish(response, remaining);
+                    }
                 }
-                State::ReceiveLengthedBody { read, response } => {
-                    let body = match read.resume(arg.take()) {
-                        SocketReadExactResult::Ok { buf } => buf,
-                        SocketReadExactResult::Err { err } => {
-                            return Http10SendResult::Err { err: err.into() };
-                        }
-                        SocketReadExactResult::Io { input } => {
-                            return Http10SendResult::Io { input };
-                        }
-                    };
+                State::BodyEof => {
+                    trace!("state: body eof");
 
-                    break finish(
-                        self.request.take().unwrap(),
-                        mem::take(response).build(body),
-                        self.keep_alive,
-                    );
-                }
-                State::ReceiveBody { read, response } => {
-                    let body = match read.resume(arg.take()) {
-                        SocketReadToEndResult::Ok { buf } => buf,
-                        SocketReadToEndResult::Err { err } => {
-                            return Http10SendResult::Err { err: err.into() };
+                    match arg.take() {
+                        Some(&[]) => {
+                            let buf = mem::take(&mut self.buf);
+                            let response = mem::take(&mut self.response).build(buf);
+                            break self.finish(response, Vec::new());
                         }
-                        SocketReadToEndResult::Io { input } => {
-                            return Http10SendResult::Io { input };
+                        Some(data) => {
+                            self.buf.extend_from_slice(data);
+                            self.wants_read = true;
                         }
-                    };
-
-                    break finish(
-                        self.request.take().unwrap(),
-                        mem::take(response).build(body),
-                        self.keep_alive,
-                    );
+                        None => {
+                            self.wants_read = true;
+                        }
+                    }
                 }
             }
+        }
+    }
+
+    /// Builds the terminal result for the given response, emitting
+    /// [`Http10SendResult::WantsRedirect`] when the status is 3xx and
+    /// the `Location` header resolves to a valid URL, otherwise
+    /// [`Http10SendResult::Ok`].
+    fn finish(&self, response: HttpResponse, remaining: Vec<u8>) -> Http10SendResult {
+        let keep_alive = self.keep_alive;
+
+        if response.status.is_redirection() {
+            if let Some(location) = response.header(LOCATION) {
+                if let Ok(url) = self.request_url.join(location) {
+                    let same_scheme = self.request_url.scheme() == url.scheme();
+                    let same_host = self.request_url.host() == url.host()
+                        && self.request_url.port() == url.port();
+                    let same_origin = same_scheme && same_host;
+
+                    return Http10SendResult::WantsRedirect {
+                        url,
+                        response,
+                        keep_alive,
+                        same_origin,
+                    };
+                }
+            }
+        }
+
+        Http10SendResult::Ok {
+            response,
+            remaining,
+            keep_alive,
         }
     }
 }
 
-/// Converts a completed request/response pair into the appropriate
-/// [`Http10SendResult`].
-///
-/// If the response is a 3xx with a parseable `Location` header, emits
-/// [`Http10SendResult::Redirect`]; otherwise emits [`Http10SendResult::Ok`].
-fn finish(request: HttpRequest, response: HttpResponse, keep_alive: bool) -> Http10SendResult {
-    if response.status.is_redirection() {
-        if let Some(location) = response.header(LOCATION) {
-            if let Ok(url) = request.url.join(location) {
-                let same_scheme = request.url.scheme() == url.scheme();
-                let same_host =
-                    request.url.host() == url.host() && request.url.port() == url.port();
-                let same_origin = same_scheme && same_host;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-                return Http10SendResult::Redirect {
-                    url,
-                    request,
+    #[test]
+    fn body_length() {
+        let req = HttpRequest::get("http://example.com".try_into().unwrap());
+        let mut coroutine = Http10Send::new(req);
+        let mut buf: Option<&[u8]> = None;
+
+        loop {
+            match coroutine.resume(buf) {
+                Http10SendResult::Ok {
                     response,
+                    remaining,
                     keep_alive,
-                    same_origin,
-                };
+                } => {
+                    assert_eq!("HTTP/1.0", response.version);
+                    assert_eq!(200, *response.status);
+                    assert_eq!(b"hello", &*response.body);
+                    assert_eq!(0, remaining.len());
+                    assert_eq!(false, keep_alive);
+                    break;
+                }
+                Http10SendResult::WantsWrite(bytes) => {
+                    assert_eq!(bytes, b"GET / HTTP/1.0\r\ncontent-length: 0\r\n\r\n");
+                    buf = None;
+                }
+                Http10SendResult::WantsRead => {
+                    buf = Some(b"HTTP/1.0 200 OK\r\nContent-Length: 5\r\n\r\nhello");
+                }
+                Http10SendResult::WantsRedirect { .. } => unreachable!("wants redirect"),
+                Http10SendResult::Err(err) => unreachable!("{err}"),
             }
         }
     }
-    Http10SendResult::Ok {
-        request,
-        response,
-        keep_alive,
+
+    #[test]
+    fn body_eof() {
+        let req = HttpRequest::get("http://example.com".try_into().unwrap());
+        let mut coroutine = Http10Send::new(req);
+        let mut buf: Option<&[u8]> = None;
+        let mut count = 0;
+
+        loop {
+            match coroutine.resume(buf) {
+                Http10SendResult::Ok {
+                    response,
+                    remaining,
+                    keep_alive,
+                } => {
+                    assert_eq!("HTTP/1.0", response.version);
+                    assert_eq!(200, *response.status);
+                    assert_eq!(b"hello world", &*response.body);
+                    assert_eq!(0, remaining.len());
+                    assert_eq!(false, keep_alive);
+                    break;
+                }
+                Http10SendResult::WantsWrite(bytes) => {
+                    assert_eq!(bytes, b"GET / HTTP/1.0\r\ncontent-length: 0\r\n\r\n");
+                    buf = None;
+                }
+                Http10SendResult::WantsRead if count == 0 => {
+                    count = 1;
+                    buf = Some(b"HTTP/1.0 200 OK\r\n\r\nhello ");
+                }
+                Http10SendResult::WantsRead if count == 1 => {
+                    count = 2;
+                    buf = Some(b"world");
+                }
+                Http10SendResult::WantsRead => {
+                    buf = Some(b"");
+                }
+                Http10SendResult::WantsRedirect { .. } => unreachable!("wants redirect"),
+                Http10SendResult::Err(err) => unreachable!("{err}"),
+            }
+        }
+    }
+
+    #[test]
+    fn keep_alive_when_server_says_so() {
+        let req = HttpRequest::get("http://example.com".try_into().unwrap());
+        let mut coroutine = Http10Send::new(req);
+        let mut buf: Option<&[u8]> = None;
+
+        loop {
+            match coroutine.resume(buf) {
+                Http10SendResult::Ok { keep_alive, .. } => {
+                    assert!(keep_alive);
+                    break;
+                }
+                Http10SendResult::WantsWrite(_) => buf = None,
+                Http10SendResult::WantsRead => {
+                    buf = Some(
+                        b"HTTP/1.0 200 OK\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n",
+                    );
+                }
+                Http10SendResult::WantsRedirect { .. } => unreachable!("wants redirect"),
+                Http10SendResult::Err(err) => unreachable!("{err}"),
+            }
+        }
     }
 }

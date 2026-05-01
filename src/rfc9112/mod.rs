@@ -8,5 +8,6 @@
 //! [`crate::rfc9110`].
 
 pub mod chunk;
+pub mod request;
 pub mod send;
 pub mod version;

@@ -10,6 +10,8 @@ let
   inherit (pkgs)
     pkg-config
     cargo-deny
+    cargo-llvm-cov
+    cargo-tarpaulin
     ;
 
   shell = pimalaya.mkShell {
@@ -29,5 +31,7 @@ shell.overrideAttrs (prev: {
 
   buildInputs = (prev.buildInputs or [ ]) ++ [
     cargo-deny
+    cargo-llvm-cov
+    cargo-tarpaulin
   ];
 })

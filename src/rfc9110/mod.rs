@@ -5,6 +5,7 @@
 //! and the abstract request/response message structure that HTTP/1.0,
 //! HTTP/1.1, HTTP/2, and HTTP/3 all implement.
 
+pub mod chars;
 pub mod headers;
 pub mod request;
 pub mod response;

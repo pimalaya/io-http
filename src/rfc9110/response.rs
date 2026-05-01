@@ -1,7 +1,7 @@
 //! HTTP response type (RFC 9110 §15).
 
-use alloc::{string::String, vec::Vec};
-use core::fmt;
+use alloc::{borrow::ToOwned, format, string::String, vec::Vec};
+use core::{fmt, str};
 
 use crate::rfc9110::{headers::SENSITIVE_HEADERS, status::StatusCode};
 
@@ -26,6 +26,33 @@ impl HttpResponse {
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(name))
             .map(|(_, v)| v.as_str())
+    }
+}
+
+impl fmt::Debug for HttpResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let headers: Vec<(&str, &str)> = self
+            .headers
+            .iter()
+            .map(|(k, v)| {
+                let sensitive = SENSITIVE_HEADERS.iter().any(|s| k.eq_ignore_ascii_case(s));
+                let v = if sensitive { "[REDACTED]" } else { v.as_str() };
+                (k.as_str(), v)
+            })
+            .collect();
+
+        f.debug_struct("HttpResponse")
+            .field("status", &self.status)
+            .field("version", &self.version)
+            .field("headers", &headers)
+            .field(
+                "body",
+                &match str::from_utf8(&self.body) {
+                    Ok(body) => body.to_owned(),
+                    Err(_) => format!("[{} BYTES]", self.body.len()),
+                },
+            )
+            .finish()
     }
 }
 
@@ -72,27 +99,6 @@ impl ResponseBuilder {
             headers: self.headers,
             body,
         }
-    }
-}
-
-impl fmt::Debug for HttpResponse {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let headers: Vec<(&str, &str)> = self
-            .headers
-            .iter()
-            .map(|(k, v)| {
-                let sensitive = SENSITIVE_HEADERS.iter().any(|s| k.eq_ignore_ascii_case(s));
-                let v = if sensitive { "[REDACTED]" } else { v.as_str() };
-                (k.as_str(), v)
-            })
-            .collect();
-
-        f.debug_struct("HttpRequest")
-            .field("status", &self.status)
-            .field("version", &self.version)
-            .field("headers", &headers)
-            .field("body", &format_args!("[{} bytes]", self.body.len()))
-            .finish()
     }
 }
 
