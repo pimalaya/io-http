@@ -5,8 +5,8 @@
 extern crate alloc;
 
 pub mod rfc1945;
-// pub mod rfc6750;
-// pub mod rfc7617;
-// pub mod rfc8615;
+pub mod rfc6750;
+pub mod rfc7617;
+pub mod rfc8615;
 pub mod rfc9110;
 pub mod rfc9112;

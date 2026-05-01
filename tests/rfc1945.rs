@@ -1,31 +1,32 @@
 //! Tests for RFC 1945 — HTTP/1.0 message syntax.
 //!
-//! All tests drive [`Http10Send`] against a pre-crafted in-memory buffer
-//! via [`stub::StubStream`]. No network connection is made.
-
-mod stub;
+//! All tests drive [`Http10Send`] against a pre-crafted in-memory
+//! response buffer. No network connection is made.
 
 use io_http::{
     rfc1945::send::{Http10Send, Http10SendResult},
     rfc9110::request::HttpRequest,
 };
-use io_socket::runtimes::std_stream::handle;
 use url::Url;
 
-use crate::stub::StubStream;
-
-fn test(response: &[u8]) -> Http10SendResult {
-    let mut stream = StubStream::new(response);
-
+fn test(response: &'static [u8]) -> Http10SendResult {
     let url = Url::parse("http://example.com/").unwrap();
     let request = HttpRequest::get(url).header("Host", "example.com");
 
     let mut send = Http10Send::new(request);
-    let mut arg = None;
+    let mut arg: Option<&[u8]> = None;
+    let mut sent = false;
 
     loop {
         match send.resume(arg.take()) {
-            Http10SendResult::Io { input } => arg = Some(handle(&mut stream, input).unwrap()),
+            Http10SendResult::WantsWrite(_) => arg = None,
+            Http10SendResult::WantsRead if !sent => {
+                sent = true;
+                arg = Some(response);
+            }
+            // After the response, signal EOF so a read-to-EOF body
+            // strategy can terminate.
+            Http10SendResult::WantsRead => arg = Some(b""),
             any => return any,
         }
     }
@@ -123,7 +124,7 @@ fn redirect_301_emits_redirect_result() {
         b"HTTP/1.0 301 Moved Permanently\r\nLocation: http://example.com/new\r\nContent-Length: 0\r\n\r\n";
 
     match test(response) {
-        Http10SendResult::Redirect { url, response, .. } => {
+        Http10SendResult::WantsRedirect { url, response, .. } => {
             assert_eq!(url.as_str(), "http://example.com/new");
             assert_eq!(*response.status, 301);
         }
@@ -137,7 +138,7 @@ fn redirect_same_origin() {
         b"HTTP/1.0 302 Found\r\nLocation: http://example.com/other\r\nContent-Length: 0\r\n\r\n";
 
     match test(response) {
-        Http10SendResult::Redirect { same_origin, .. } => assert!(same_origin),
+        Http10SendResult::WantsRedirect { same_origin, .. } => assert!(same_origin),
         other => panic!("unexpected result: {other:?}"),
     }
 }
@@ -148,7 +149,7 @@ fn redirect_cross_origin_different_host() {
         b"HTTP/1.0 302 Found\r\nLocation: http://other.com/\r\nContent-Length: 0\r\n\r\n";
 
     match test(response) {
-        Http10SendResult::Redirect { same_origin, .. } => assert!(!same_origin),
+        Http10SendResult::WantsRedirect { same_origin, .. } => assert!(!same_origin),
         other => panic!("unexpected result: {other:?}"),
     }
 }
@@ -168,7 +169,7 @@ fn err_on_malformed_headers() {
     let response = b"NOT HTTP AT ALL\r\n\r\n";
 
     match test(response) {
-        Http10SendResult::Err { .. } => {}
+        Http10SendResult::Err(_) => {}
         other => panic!("expected Err, got: {other:?}"),
     }
 }

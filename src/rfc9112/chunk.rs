@@ -71,11 +71,15 @@ pub struct Http11ReadChunks {
 impl Http11ReadChunks {
     /// Advances the coroutine.
     ///
-    /// Pass `None` on the first call. On subsequent calls, pass the
-    /// [`SocketOutput`] returned by the runtime after processing the
-    /// last emitted [`SocketInput`].
-    pub fn resume(&mut self, arg: &[u8]) -> Http11ReadChunksResult {
-        self.buf.extend_from_slice(arg);
+    /// Pass [`None`] when there is no data to provide (initial call or
+    /// internal re-entry). Pass `Some(data)` with bytes read from the
+    /// socket after a [`Http11ReadChunksResult::WantsRead`]. Pass
+    /// `Some(&[])` to signal EOF.
+    pub fn resume(&mut self, arg: Option<&[u8]>) -> Http11ReadChunksResult {
+        if let Some(data) = arg {
+            trace!("resume with arg: {}", String::from_utf8_lossy(data));
+            self.buf.extend_from_slice(data);
+        }
 
         loop {
             if self.wants_read {
@@ -91,10 +95,14 @@ impl Http11ReadChunks {
 
             match self.state {
                 State::ChunkSize => {
+                    trace!("state: chunk size");
+
                     let Some(crlf) = memmem::find(&self.buf, &CRLF) else {
                         self.wants_read = true;
                         continue;
                     };
+
+                    trace!("crlf: {crlf:?}");
 
                     // search for potential chunk extension
                     let ext = match memchr::memchr(b';', &self.buf[..crlf]) {
@@ -119,11 +127,16 @@ impl Http11ReadChunks {
                     self.state = State::ChunkData(n);
                 }
                 State::ChunkData(size) if self.buf.len() < size + CRLF.len() => {
+                    trace!("state: chunk data {size}");
+                    trace!("received incomplete chunk data {}/{size}", self.buf.len());
                     self.wants_read = true;
                     continue;
                 }
                 State::ChunkData(size) => {
+                    trace!("state: chunk data {size}");
                     // drain <size> from buffer
+
+                    trace!("drained: {}", String::from_utf8_lossy(&self.buf[..size]));
                     self.body.extend(self.buf.drain(..size));
                     // remove trailing \r\n from buffer
                     self.buf.drain(..CRLF.len());
@@ -144,7 +157,7 @@ mod tests {
         let mut coroutine = Http11ReadChunks::default();
 
         loop {
-            match coroutine.resume(encoded.as_bytes()) {
+            match coroutine.resume(Some(encoded.as_bytes())) {
                 Http11ReadChunksResult::Ok { body, remaining } => {
                     assert_eq!(body, decoded.as_bytes());
                     assert_eq!(remaining, b"");
@@ -159,7 +172,7 @@ mod tests {
     #[test]
     fn incomplete_chunk_size() {
         let mut coroutine = Http11ReadChunks::default();
-        let mut buf: &[u8] = b"5\r";
+        let mut buf: Option<&[u8]> = Some(b"5\r");
 
         loop {
             match coroutine.resume(buf) {
@@ -168,7 +181,7 @@ mod tests {
                     assert_eq!(remaining, b"");
                     break;
                 }
-                Http11ReadChunksResult::WantsRead => buf = b"\nHello\r\n0\r\n\r\n",
+                Http11ReadChunksResult::WantsRead => buf = Some(b"\nHello\r\n0\r\n\r\n"),
                 Http11ReadChunksResult::Err(err) => unreachable!("{err}"),
             }
         }
@@ -177,7 +190,7 @@ mod tests {
     #[test]
     fn invalid_chunk_size() {
         let mut coroutine = Http11ReadChunks::default();
-        let buf: &[u8] = b":\r\n0\r\n\r\n";
+        let buf: Option<&[u8]> = Some(b":\r\n0\r\n\r\n");
 
         loop {
             match coroutine.resume(buf) {
@@ -193,7 +206,7 @@ mod tests {
     #[test]
     fn incomplete_chunk_data() {
         let mut coroutine = Http11ReadChunks::default();
-        let mut buf: &[u8] = b"5\r\nHell";
+        let mut buf: Option<&[u8]> = Some(b"5\r\nHell");
 
         loop {
             match coroutine.resume(buf) {
@@ -202,7 +215,7 @@ mod tests {
                     assert_eq!(remaining, b"");
                     break;
                 }
-                Http11ReadChunksResult::WantsRead => buf = b"o\r\n0\r\n\r\n",
+                Http11ReadChunksResult::WantsRead => buf = Some(b"o\r\n0\r\n\r\n"),
                 Http11ReadChunksResult::Err(err) => unreachable!("{err}"),
             }
         }

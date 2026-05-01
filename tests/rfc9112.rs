@@ -1,34 +1,28 @@
 //! Tests for RFC 9112 — HTTP/1.1 message syntax.
 //!
 //! All tests drive [`Http11Send`] against a pre-crafted in-memory
-//! buffer via [`stub::StubStream`]. No network connection is made.
-
-mod stub;
+//! response buffer. No network connection is made.
 
 use io_http::{
     rfc9110::request::HttpRequest,
     rfc9112::{
-        chunk::{HttpChunksRead, HttpChunksReadResult},
+        chunk::{Http11ReadChunks, Http11ReadChunksResult},
         send::{Http11Send, Http11SendResult},
     },
 };
-use io_socket::{coroutines::read::SocketRead, runtimes::std_stream::handle};
 use url::Url;
 
-use crate::stub::StubStream;
-
-fn test(response: &[u8]) -> Http11SendResult {
-    let mut stream = StubStream::new(response);
-
+fn test(response: &'static [u8]) -> Http11SendResult {
     let url = Url::parse("http://example.com/").unwrap();
     let request = HttpRequest::get(url).header("Host", "example.com");
 
     let mut send = Http11Send::new(request);
-    let mut arg = None;
+    let mut arg: Option<&[u8]> = None;
 
     loop {
         match send.resume(arg.take()) {
-            Http11SendResult::Io { input } => arg = Some(handle(&mut stream, input).unwrap()),
+            Http11SendResult::WantsWrite(_) => arg = None,
+            Http11SendResult::WantsRead => arg = Some(response),
             any => return any,
         }
     }
@@ -76,7 +70,27 @@ fn body_chunked() {
 fn body_read_to_eof() {
     let response = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nhello world";
 
-    match test(response) {
+    // EOF terminates the body when neither Content-Length nor
+    // Transfer-Encoding is present, so drive an explicit empty read.
+    let url = Url::parse("http://example.com/").unwrap();
+    let request = HttpRequest::get(url).header("Host", "example.com");
+    let mut send = Http11Send::new(request);
+    let mut arg: Option<&[u8]> = None;
+    let mut sent = false;
+
+    let result = loop {
+        match send.resume(arg.take()) {
+            Http11SendResult::WantsWrite(_) => arg = None,
+            Http11SendResult::WantsRead if !sent => {
+                sent = true;
+                arg = Some(response);
+            }
+            Http11SendResult::WantsRead => arg = Some(b""),
+            any => break any,
+        }
+    };
+
+    match result {
         Http11SendResult::Ok { response, .. } => assert_eq!(response.body, b"hello world"),
         other => panic!("unexpected result: {other:?}"),
     }
@@ -112,7 +126,27 @@ fn body_empty_on_304() {
 fn body_chunked_ignored_on_http10_response() {
     let response = b"HTTP/1.0 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
 
-    match test(response) {
+    // No Content-Length → falls back to read-to-EOF; drive an empty
+    // read after the response bytes.
+    let url = Url::parse("http://example.com/").unwrap();
+    let request = HttpRequest::get(url).header("Host", "example.com");
+    let mut send = Http11Send::new(request);
+    let mut arg: Option<&[u8]> = None;
+    let mut sent = false;
+
+    let result = loop {
+        match send.resume(arg.take()) {
+            Http11SendResult::WantsWrite(_) => arg = None,
+            Http11SendResult::WantsRead if !sent => {
+                sent = true;
+                arg = Some(response);
+            }
+            Http11SendResult::WantsRead => arg = Some(b""),
+            any => break any,
+        }
+    };
+
+    match result {
         // Body must be the raw wire bytes, not the decoded chunk payload.
         Http11SendResult::Ok { response, .. } => assert_ne!(response.body, b"hello"),
         other => panic!("unexpected result: {other:?}"),
@@ -203,22 +237,18 @@ fn err_on_malformed_headers() {
     let response = b"NOT HTTP AT ALL\r\n\r\n";
 
     match test(response) {
-        Http11SendResult::Err { .. } => {}
+        Http11SendResult::Err(_) => {}
         other => panic!("expected Err, got: {other:?}"),
     }
 }
 
 fn test_chunks(encoded: &[u8]) -> Vec<u8> {
-    let mut stream = StubStream::new(encoded);
-    let mut http = HttpChunksRead::new(SocketRead::default());
-    let mut arg = None;
+    let mut chunks = Http11ReadChunks::default();
 
-    loop {
-        match http.resume(arg.take()) {
-            HttpChunksReadResult::Ok { body } => return body,
-            HttpChunksReadResult::Err { err } => panic!("unexpected error: {err}"),
-            HttpChunksReadResult::Io { input } => arg = Some(handle(&mut stream, input).unwrap()),
-        }
+    match chunks.resume(Some(encoded)) {
+        Http11ReadChunksResult::Ok { body, .. } => body,
+        Http11ReadChunksResult::WantsRead => panic!("unexpected WantsRead"),
+        Http11ReadChunksResult::Err(err) => panic!("unexpected error: {err}"),
     }
 }
 

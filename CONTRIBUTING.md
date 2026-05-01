@@ -30,16 +30,6 @@ cargo build
 cargo test
 ```
 
-## Override dependencies
-
-All Pimalaya crates use `[patch.crates-io]` to point to sibling directories.
-If you want to build io-dns against a locally modified dependency (e.g. `io-socket`), add the following to `Cargo.toml`:
-
-```toml
-[patch.crates-io]
-io-socket.path = "/path/to/io-socket"
-```
-
 ## Commit style
 
 I/O HTTP follows the [conventional commits specification](https://www.conventionalcommits.org/en/v1.0.0/#summary).

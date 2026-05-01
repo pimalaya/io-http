@@ -1,8 +1,8 @@
 //! HTTP/1.1 request over TLS using the async Tokio runtime.
 //!
-//! Demonstrates [`Http11Send`] with `tokio-rustls` for TLS and
-//! [`io_socket::runtimes::tokio_stream::handle`] as the async I/O
-//! driver.
+//! Demonstrates [`Http11Send`] with `tokio-rustls` for TLS. The
+//! coroutine itself does no I/O; bytes are pushed/pulled via
+//! [`AsyncReadExt::read`] / [`AsyncWriteExt::write_all`].
 //!
 //! # Usage
 //!
@@ -16,11 +16,13 @@ use io_http::{
     rfc9110::request::HttpRequest,
     rfc9112::send::{Http11Send, Http11SendResult},
 };
-use io_socket::runtimes::tokio_stream::handle;
 use log::info;
 use rustls::ClientConfig;
 use rustls_platform_verifier::ConfigVerifierExt;
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 use tokio_rustls::TlsConnector;
 use url::Url;
 
@@ -50,15 +52,20 @@ async fn main() {
             .header("Host", &domain)
             .header("Connection", "close");
 
-        let mut arg = None;
         let mut send = Http11Send::new(request);
+        let mut arg: Option<&[u8]> = None;
+        let mut buf = [0u8; 4096];
 
         loop {
             match send.resume(arg.take()) {
                 Http11SendResult::Ok { response, .. } => break 'outer response,
-                Http11SendResult::Err { err } => panic!("{err}"),
-                Http11SendResult::Io { input } => {
-                    arg = Some(handle(&mut stream, input).await.unwrap())
+                Http11SendResult::Err(err) => panic!("{err}"),
+                Http11SendResult::WantsWrite(bytes) => {
+                    stream.write_all(&bytes).await.unwrap();
+                }
+                Http11SendResult::WantsRead => {
+                    let n = stream.read(&mut buf).await.unwrap();
+                    arg = Some(&buf[..n]);
                 }
                 Http11SendResult::WantsRedirect { url: new_url, .. } => {
                     info!("redirection requested");

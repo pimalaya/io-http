@@ -1,8 +1,8 @@
 //! HTTP/1.0 request over a plain TCP connection (blocking).
 //!
 //! Demonstrates [`Http10Send`] with the synchronous `std` runtime.
-//! HTTP/1.0 (RFC 1945) has no persistent connections by default and no
-//! chunked transfer encoding.
+//! HTTP/1.0 (RFC 1945) has no persistent connections by default and
+//! no chunked transfer encoding.
 //!
 //! # Usage
 //!
@@ -10,13 +10,16 @@
 //! URL=http://example.com/ cargo run --example std_http10
 //! ```
 
-use std::{env, net::TcpStream};
+use std::{
+    env,
+    io::{Read, Write},
+    net::TcpStream,
+};
 
 use io_http::{
     rfc1945::send::{Http10Send, Http10SendResult},
     rfc9110::request::HttpRequest,
 };
-use io_socket::runtimes::std_stream::handle;
 use log::info;
 use url::Url;
 
@@ -38,15 +41,22 @@ fn main() {
 
         let request = HttpRequest::get(url.clone()).header("Host", &host);
 
-        let mut arg = None;
         let mut send = Http10Send::new(request);
+        let mut arg: Option<&[u8]> = None;
+        let mut buf = [0u8; 4096];
 
         loop {
             match send.resume(arg.take()) {
                 Http10SendResult::Ok { response, .. } => break 'outer response,
-                Http10SendResult::Err { err } => panic!("{err}"),
-                Http10SendResult::Io { input } => arg = Some(handle(&mut stream, input).unwrap()),
-                Http10SendResult::Redirect { url: new_url, .. } => {
+                Http10SendResult::Err(err) => panic!("{err}"),
+                Http10SendResult::WantsWrite(bytes) => {
+                    stream.write_all(&bytes).unwrap();
+                }
+                Http10SendResult::WantsRead => {
+                    let n = stream.read(&mut buf).unwrap();
+                    arg = Some(&buf[..n]);
+                }
+                Http10SendResult::WantsRedirect { url: new_url, .. } => {
                     info!("redirection requested");
                     url = new_url;
                     break;
