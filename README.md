@@ -1,30 +1,44 @@
 # I/O HTTP [![Documentation](https://img.shields.io/docsrs/io-http?style=flat&logo=docs.rs&logoColor=white)](https://docs.rs/io-http/latest/io_http) [![Matrix](https://img.shields.io/badge/chat-%23pimalaya-blue?style=flat&logo=matrix&logoColor=white)](https://matrix.to/#/#pimalaya:matrix.org) [![Mastodon](https://img.shields.io/badge/news-%40pimalaya-blue?style=flat&logo=mastodon&logoColor=white)](https://fosstodon.org/@pimalaya)
 
-**I/O-free** HTTP/1.X client library written in Rust
+HTTP/1.X client library, written in Rust
 
 ## Table of contents
 
+- [Features](#features)
 - [RFC coverage](#rfc-coverage)
 - [Examples](#examples)
-  - [Send an HTTPS/1.1 request via rustls (blocking)](#send-an-https11-request-via-rustls-blocking)
-  - [Discover a `.well-known` endpoint via Tokio (async)](#discover-a-well-known-endpoint-via-tokio-async)
+  - [As a no-std coroutine library](#as-a-no-std-coroutine-library)
+  - [As a light std client (BYO stream)](#as-a-light-std-client-byo-stream)
+  - [As a full std client (TCP + TLS)](#as-a-full-std-client-tcp--tls)
 - [More examples](#more-examples)
 - [License](#license)
 - [Social](#social)
 - [Sponsoring](#sponsoring)
 
+## Features
+
+- **I/O-free** coroutines: every HTTP exchange is exposed as a `resume(arg: Option<&[u8]>)` state machine. No sockets, no async runtime, no `std` required. Run against any blocking, async, or fuzz harness.
+- **Standard, blocking client**:
+  - Light client (requires `client` feature): `HttpClientStd::new(stream)` wraps a connected `Read + Write` stream and exposes `send` / `send_http10`. You still own TCP / TLS.
+  - Full std client (requires `rustls-ring`, `rustls-aws`, or `native-tls` feature): `HttpClientStd::connect(url, tls)` opens `http://` / `https://` URLs via [pimalaya/stream](https://github.com/pimalaya/stream) and returns a ready-to-use client.
+- **HTTP versions**: HTTP/1.0 (RFC 1945, fixed-length or read-to-EOF body) and HTTP/1.1 (RFC 9112, fixed-length, chunked, or read-to-EOF body).
+- **Authentication helpers**: `Authorization: Bearer <token>` (RFC 6750) and `Authorization: Basic <base64(user:pass)>` (RFC 7617).
+- **`.well-known` discovery** (RFC 8615) shipped as a dedicated coroutine.
+
+*The `io-http` library is written in [Rust](https://www.rust-lang.org/), and relies on [cargo features](https://doc.rust-lang.org/cargo/reference/features.html) to enable or disable functionalities. Default features can be found in the `features` section of the [`Cargo.toml`](https://github.com/pimalaya/io-http/blob/master/Cargo.toml), or on [docs.rs](https://docs.rs/crate/io-http/latest/features).*
+
 ## RFC coverage
 
-This library implements HTTP as I/O-agnostic coroutines — no sockets, no async runtime, no `std` required.
+This library implements HTTP as I/O-agnostic coroutines: no sockets, no async runtime, no `std` required by the protocol layer.
 
-| RFC    | What it covers                                                                    |
-|--------|-----------------------------------------------------------------------------------|
-| [1945] | HTTP/1.0 — request/response coroutine (`Http10Send`)                              |
-| [6750] | OAuth 2.0 Bearer token — `Authorization: Bearer <token>`                          |
-| [7617] | HTTP Basic authentication — `Authorization: Basic <base64(user:pass)>`            |
-| [8615] | `.well-known` URI discovery — `WellKnown` coroutine                               |
-| [9110] | HTTP semantics — shared types: `HttpRequest`, `HttpResponse`, `StatusCode`        |
-| [9112] | HTTP/1.1 — request/response coroutine (`Http11Send`), chunked transfer encoding   |
+| Module   | What it covers                                                                  |
+|----------|---------------------------------------------------------------------------------|
+| [1945]   | HTTP/1.0: request/response coroutine (`Http10Send`)                             |
+| [6750]   | OAuth 2.0 Bearer token: `Authorization: Bearer <token>`                         |
+| [7617]   | HTTP Basic authentication: `Authorization: Basic <base64(user:pass)>`           |
+| [8615]   | `.well-known` URI discovery: `WellKnown` coroutine                              |
+| [9110]   | HTTP semantics: shared types `HttpRequest`, `HttpResponse`, `StatusCode`        |
+| [9112]   | HTTP/1.1: request/response coroutine (`Http11Send`), chunked transfer encoding  |
 
 [1945]: https://www.rfc-editor.org/rfc/rfc1945
 [6750]: https://www.rfc-editor.org/rfc/rfc6750
@@ -35,62 +49,30 @@ This library implements HTTP as I/O-agnostic coroutines — no sockets, no async
 
 ## Examples
 
-### Send an HTTPS/1.1 request via rustls (blocking)
+`io-http` can be consumed three ways, depending on how much of the I/O stack you want to own. Each mode is gated by cargo features.
 
-```rust,ignore
-use std::{
-    io::{Read, Write},
-    net::TcpStream,
-    sync::Arc,
-};
+Whichever mode you pick, every coroutine exposes `resume(arg: Option<&[u8]>)` returning a result enum with four shapes:
 
-use io_http::rfc9110::request::HttpRequest;
-use io_http::rfc9112::send::{Http11Send, Http11SendResult};
-use rustls::{ClientConfig, ClientConnection, StreamOwned};
-use rustls_platform_verifier::ConfigVerifierExt;
-use url::Url;
+- `WantsRead`: caller reads more bytes from the socket and feeds them back on the next call. Pass `Some(&[])` to signal EOF.
+- `WantsWrite(Vec<u8>)`: caller writes these bytes to the socket. The next call typically passes `None`.
+- `Ok { … }`: terminal success.
+- `Err { … }`: terminal failure.
 
-let url = Url::parse("https://example.com/").unwrap();
-let domain = url.domain().unwrap();
+`Http10Send` / `Http11Send` also expose a `WantsRedirect { url, response, … }` variant; follow the redirect by building a new coroutine against `url` (possibly on a new connection).
 
-let config = ClientConfig::with_platform_verifier().unwrap();
-let server_name = domain.to_string().try_into().unwrap();
-let conn = ClientConnection::new(Arc::new(config), server_name).unwrap();
-let tcp = TcpStream::connect((domain, 443)).unwrap();
-let mut tls = StreamOwned::new(conn, tcp);
+### As a no-std coroutine library
 
-let request = HttpRequest::get(url)
-    .header("Host", domain)
-    .header("Connection", "close");
+No features required: works in `#![no_std]`, no sockets, no async runtime. You own the loop and the bytes; the library only produces request bytes and consumes server responses.
 
-let mut send = Http11Send::new(request);
-let mut arg: Option<&[u8]> = None;
-let mut buf = [0u8; 4096];
-
-let response = loop {
-    match send.resume(arg.take()) {
-        Http11SendResult::Ok { response, .. } => break response,
-        Http11SendResult::WantsRedirect { url, .. } => { /* follow redirect */ break todo!() }
-        Http11SendResult::Err(err) => panic!("{err}"),
-        Http11SendResult::WantsRead => {
-            let n = tls.read(&mut buf).unwrap();
-            arg = Some(&buf[..n]);
-        }
-        Http11SendResult::WantsWrite(bytes) => tls.write_all(&bytes).unwrap(),
-    }
-};
-
-println!("{} {}", response.version, *response.status);
-```
-
-*See complete example at [./examples/std_http10.rs](https://github.com/pimalaya/io-http/blob/master/examples/std_http10.rs).*
-
-### Discover a `.well-known` endpoint via Tokio (async)
+Send an HTTP/1.1 request against an async Tokio + rustls stack (the same shape works under blocking, fuzzing, or in-memory replay):
 
 ```rust,ignore
 use std::sync::Arc;
 
-use io_http::rfc8615::well_known::{WellKnown, WellKnownResult};
+use io_http::{
+    rfc9110::request::HttpRequest,
+    rfc9112::send::{Http11Send, Http11SendResult},
+};
 use rustls::ClientConfig;
 use rustls_platform_verifier::ConfigVerifierExt;
 use tokio::{
@@ -98,46 +80,114 @@ use tokio::{
     net::TcpStream,
 };
 use tokio_rustls::TlsConnector;
+use url::Url;
 
 #[tokio::main]
 async fn main() {
-    let request = WellKnown::prepare_request("https://example.com", "caldav").unwrap();
-    let domain = request.url.domain().unwrap().to_owned();
+    let url = Url::parse("https://example.com/").unwrap();
+    let domain = url.domain().unwrap().to_owned();
+    let port = url.port_or_known_default().unwrap_or(443);
 
     let config = Arc::new(ClientConfig::with_platform_verifier().unwrap());
     let connector = TlsConnector::from(config);
     let server_name = domain.clone().try_into().unwrap();
-    let tcp = TcpStream::connect((domain.as_str(), 443)).await.unwrap();
-    let mut tls = connector.connect(server_name, tcp).await.unwrap();
+    let tcp = TcpStream::connect((domain.as_str(), port)).await.unwrap();
+    let mut stream = connector.connect(server_name, tcp).await.unwrap();
 
-    let mut well_known = WellKnown::new(request);
+    let request = HttpRequest::get(url)
+        .header("Host", &domain)
+        .header("Connection", "close");
+
+    let mut send = Http11Send::new(request);
     let mut arg: Option<&[u8]> = None;
     let mut buf = [0u8; 4096];
 
-    loop {
-        match well_known.resume(arg.take()) {
-            WellKnownResult::Ok { redirect_url: Some(url), .. } => {
-                println!("caldav endpoint: {url}");
-                break;
-            }
-            WellKnownResult::Ok { response, .. } => {
-                panic!("expected redirect, got {}", *response.status);
-            }
-            WellKnownResult::Err(err) => panic!("{err}"),
-            WellKnownResult::WantsRead => {
-                let n = tls.read(&mut buf).await.unwrap();
+    let response = loop {
+        match send.resume(arg.take()) {
+            Http11SendResult::Ok { response, .. } => break response,
+            Http11SendResult::WantsRead => {
+                let n = stream.read(&mut buf).await.unwrap();
                 arg = Some(&buf[..n]);
             }
-            WellKnownResult::WantsWrite(bytes) => tls.write_all(&bytes).await.unwrap(),
+            Http11SendResult::WantsWrite(bytes) => stream.write_all(&bytes).await.unwrap(),
+            Http11SendResult::WantsRedirect { url, .. } => panic!("redirect to {url}"),
+            Http11SendResult::Err(err) => panic!("{err}"),
         }
-    }
+    };
+
+    println!("{} {}", response.version, *response.status);
 }
 ```
 
+### As a light std client (BYO stream)
+
+Enable the `client` feature. `HttpClientStd::new(stream)` wraps any blocking `Read + Write` and exposes `send` / `send_http10`. You still open the TCP socket and run TLS yourself, and hand over a ready-to-talk stream; the client takes it from there.
+
+```toml,ignore
+[dependencies]
+io-http = { version = "0.0.3", default-features = false, features = ["client"] }
+```
+
+```rust,ignore
+use std::{net::TcpStream, sync::Arc};
+
+use io_http::{client::HttpClientStd, rfc9110::request::HttpRequest};
+use rustls::{ClientConfig, ClientConnection, StreamOwned};
+use rustls_platform_verifier::ConfigVerifierExt;
+use url::Url;
+
+let url = Url::parse("https://example.com/")?;
+let domain = url.domain().unwrap();
+
+let config = ClientConfig::with_platform_verifier()?;
+let server_name = domain.to_string().try_into()?;
+let conn = ClientConnection::new(Arc::new(config), server_name)?;
+let tcp = TcpStream::connect((domain, 443))?;
+let stream = StreamOwned::new(conn, tcp);
+
+let mut client = HttpClientStd::new(stream);
+
+let request = HttpRequest::get(url)
+    .header("Host", domain)
+    .header("Connection", "close");
+
+let output = client.send(request)?;
+println!("{} {}", output.response.version, *output.response.status);
+```
+
+### As a full std client (TCP + TLS)
+
+Enable one of the TLS feature flags: `rustls-ring` (default), `rustls-aws`, or `native-tls`. `HttpClientStd::connect(url, tls)` opens `http://` (plain TCP) or `https://` (implicit TLS) via [pimalaya/stream](https://github.com/pimalaya/stream), returning a ready-to-use client.
+
+```toml,ignore
+[dependencies]
+io-http = "0.0.3" # rustls-ring is enabled by default
+```
+
+```rust,ignore
+use io_http::{client::HttpClientStd, rfc9110::request::HttpRequest};
+use pimalaya_stream::tls::Tls;
+use url::Url;
+
+let url = Url::parse("https://example.com/")?;
+let tls = Tls::default();
+let mut client = HttpClientStd::connect(&url, &tls)?;
+
+let request = HttpRequest::get(url.clone())
+    .header("Host", url.host_str().unwrap())
+    .header("Connection", "close");
+
+let output = client.send(request)?;
+println!("{} {}", output.response.version, *output.response.status);
+```
+
+*See complete examples at [./examples](https://github.com/pimalaya/io-http/blob/master/examples).*
+
 ## More examples
 
-Have a look at projects built on the top of this library:
+Have a look at projects built on top of this library:
 
+- [io-jmap](https://github.com/pimalaya/io-jmap): Set of I/O-free Rust coroutines to manage JMAP sessions
 - [io-addressbook](https://github.com/pimalaya/io-addressbook): Set of I/O-free coroutines to manage contacts
 - [io-oauth](https://github.com/pimalaya/io-oauth): Set of I/O-free Rust coroutines to manage OAuth flows
 - [io-starttls](https://github.com/pimalaya/io-starttls): I/O-free Rust coroutine to upgrade any plain stream to a secure one
@@ -165,9 +215,10 @@ at your option.
 
 Special thanks to the [NLnet foundation](https://nlnet.nl/) and the [European Commission](https://www.ngi.eu/) that have been financially supporting the project for years:
 
-- 2022: [NGI Assure](https://nlnet.nl/project/Himalaya/)
-- 2023: [NGI Zero Entrust](https://nlnet.nl/project/Pimalaya/)
-- 2024: [NGI Zero Core](https://nlnet.nl/project/Pimalaya-PIM/) *(still ongoing in 2026)*
+- 2022 → 2023: [NGI Assure](https://nlnet.nl/project/Himalaya/)
+- 2023 → 2024: [NGI Zero Entrust](https://nlnet.nl/project/Pimalaya/)
+- 2024 → 2026: [NGI Zero Core](https://nlnet.nl/project/Pimalaya-PIM/)
+- *2027 in preparation…*
 
 If you appreciate the project, feel free to donate using one of the following providers:
 

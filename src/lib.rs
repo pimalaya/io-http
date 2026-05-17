@@ -3,7 +3,11 @@
 #![doc = include_str!("../README.md")]
 
 extern crate alloc;
+#[cfg(feature = "std")]
+extern crate std;
 
+#[cfg(feature = "client")]
+pub mod client;
 pub mod rfc1945;
 pub mod rfc6750;
 pub mod rfc7617;

@@ -30,6 +30,16 @@ cargo build
 cargo test
 ```
 
+## Override dependencies
+
+All Pimalaya crates use `[patch.crates-io]` to point to sibling directories.
+If you want to build io-http against a locally modified dependency (e.g. `pimalaya-stream`), add the following to `Cargo.toml`:
+
+```toml
+[patch.crates-io]
+pimalaya-stream.path = "/path/to/stream"
+```
+
 ## Commit style
 
 I/O HTTP follows the [conventional commits specification](https://www.conventionalcommits.org/en/v1.0.0/#summary).

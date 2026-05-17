@@ -16,6 +16,17 @@ repository = "https://github.com/pimalaya/io-http"
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
+[features]
+default = ["rustls-ring"]
+std = []
+client = ["std"]
+
+# TLS — implies `client` and pulls pimalaya-stream as the transport.
+rustls-ring = ["client", "pimalaya-stream/rustls-ring", "dep:anyhow", "dep:pimalaya-stream"]
+rustls-aws  = ["client", "pimalaya-stream/rustls-aws",  "dep:anyhow", "dep:pimalaya-stream"]
+native-tls  = ["client", "pimalaya-stream/native-tls",  "dep:anyhow", "dep:pimalaya-stream"]
+vendored    = ["pimalaya-stream?/vendored"]
+
 [dev-dependencies]
 env_logger = "0.11"
 rustls = { version = "0.23", default-features = false, features = ["logging", "ring", "std", "tls12"] }
@@ -25,10 +36,15 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["loggin
 url = { version = "2.5", default-features = false }
 
 [dependencies]
+anyhow = { version = "1", optional = true }
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 httparse = { version = "1.10", default-features = false }
 log = { version = "0.4", default-features = false }
 memchr = { version = "2.7", default-features = false }
+pimalaya-stream = { version = "0.0.1", default-features = false, optional = true }
 secrecy = { version = "0.10", default-features = false }
 thiserror = { version = "2", default-features = false }
 url = { version = "2.5", default-features = false }
+
+[patch.crates-io]
+pimalaya-stream.git = "https://github.com/pimalaya/stream"
