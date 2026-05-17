@@ -21,12 +21,9 @@
     feature = "rustls-ring",
     feature = "native-tls"
 ))]
-use std::string::{String, ToString};
-use std::{
-    boxed::Box,
-    io::{self, Read, Write},
-    vec::Vec,
-};
+use alloc::string::{String, ToString};
+use alloc::{boxed::Box, vec::Vec};
+use std::io::{self, Read, Write};
 
 #[cfg(any(
     feature = "rustls-aws",

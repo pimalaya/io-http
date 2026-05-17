@@ -28,7 +28,7 @@ impl Deref for StatusCode {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::rfc9110::status::*;
 
     #[test]
     fn success_range() {

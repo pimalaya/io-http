@@ -3,8 +3,9 @@
 //! Bearer tokens are transmitted as-is in the `Authorization` request
 //! header (RFC 6750 §2.1).
 
-use alloc::{format, string::String};
 use core::fmt;
+
+use alloc::{format, string::String};
 
 use secrecy::{ExposeSecret, SecretString};
 use thiserror::Error;
@@ -88,11 +89,11 @@ impl Eq for BearerToken {}
 
 #[cfg(test)]
 mod tests {
-    use alloc::string::ToString;
+    use alloc::{format, string::ToString};
 
     use secrecy::ExposeSecret;
 
-    use super::*;
+    use crate::rfc6750::bearer::*;
 
     #[test]
     fn to_authorization_rfc_example() {
@@ -138,7 +139,7 @@ mod tests {
     #[test]
     fn debug_redacts_token() {
         let token = BearerToken::new("super-secret-token");
-        let debug = alloc::format!("{token:?}");
+        let debug = format!("{token:?}");
         assert!(
             !debug.contains("super-secret-token"),
             "token must not appear in debug"

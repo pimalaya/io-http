@@ -1,6 +1,6 @@
 [package]
 name = "io-http"
-description = "I/O-free HTTP/1.X client library"
+description = "HTTP/1.X client library"
 version = "0.0.3"
 authors = ["Clément DOUIN <pimalaya.org@posteo.net>"]
 rust-version = "1.87"
@@ -17,11 +17,8 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["rustls-ring"]
-std = []
-client = ["std"]
-
-# TLS — implies `client` and pulls pimalaya-stream as the transport.
+default = []
+client = []
 rustls-ring = ["client", "pimalaya-stream/rustls-ring", "dep:anyhow", "dep:pimalaya-stream"]
 rustls-aws  = ["client", "pimalaya-stream/rustls-aws",  "dep:anyhow", "dep:pimalaya-stream"]
 native-tls  = ["client", "pimalaya-stream/native-tls",  "dep:anyhow", "dep:pimalaya-stream"]

@@ -1,7 +1,8 @@
 //! HTTP response type (RFC 9110 §15).
 
-use alloc::{borrow::ToOwned, format, string::String, vec::Vec};
 use core::{fmt, str};
+
+use alloc::{borrow::ToOwned, format, string::String, vec::Vec};
 
 use crate::rfc9110::{headers::SENSITIVE_HEADERS, status::StatusCode};
 
@@ -106,7 +107,7 @@ impl ResponseBuilder {
 mod tests {
     use alloc::vec;
 
-    use super::*;
+    use crate::rfc9110::response::*;
 
     #[test]
     fn header_case_insensitive() {

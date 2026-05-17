@@ -42,13 +42,15 @@
 //! }
 //! ```
 
-use alloc::{string::String, vec::Vec};
+use alloc::{format, string::String, vec::Vec};
 
 use thiserror::Error;
 use url::{ParseError, Url};
 
-use crate::rfc9110::{request::HttpRequest, response::HttpResponse};
-use crate::rfc9112::send::{Http11Send, Http11SendError, Http11SendResult};
+use crate::{
+    rfc9110::{request::HttpRequest, response::HttpResponse},
+    rfc9112::send::{Http11Send, Http11SendError, Http11SendResult},
+};
 
 /// Errors that can occur during the coroutine progression.
 #[derive(Debug, Error)]
@@ -112,7 +114,6 @@ impl WellKnown {
         base_url: impl AsRef<str>,
         service: impl AsRef<str>,
     ) -> Result<HttpRequest, WellKnownError> {
-        use alloc::format;
         let base = base_url.as_ref();
         let mut url =
             Url::parse(base).map_err(|e| WellKnownError::InvalidBaseUrl(e, base.into()))?;
@@ -166,7 +167,7 @@ impl WellKnown {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::rfc8615::well_known::*;
 
     #[test]
     fn prepare_request_sets_well_known_path() {

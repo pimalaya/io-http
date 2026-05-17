@@ -151,7 +151,7 @@ impl Http11ReadChunks {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::rfc9112::chunk::*;
 
     fn test(encoded: &str, decoded: &str) {
         let mut coroutine = Http11ReadChunks::default();

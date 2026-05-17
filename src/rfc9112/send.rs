@@ -385,7 +385,7 @@ impl Http11Send {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::rfc9112::send::*;
 
     #[test]
     fn body_chunks() {

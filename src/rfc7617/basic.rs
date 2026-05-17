@@ -4,11 +4,12 @@
 //! `username:password` pair in the `Authorization` request header
 //! (RFC 7617 §2).
 
+use core::{fmt, str::from_utf8};
+
 use alloc::{
     format,
     string::{String, ToString},
 };
-use core::{fmt, str::from_utf8};
 
 use base64::{DecodeError, prelude::BASE64_STANDARD, prelude::Engine as _};
 use secrecy::{ExposeSecret, SecretString};
@@ -118,9 +119,11 @@ impl Eq for BasicCredentials {}
 
 #[cfg(test)]
 mod tests {
+    use alloc::format;
+
     use secrecy::ExposeSecret;
 
-    use super::*;
+    use crate::rfc7617::basic::*;
 
     #[test]
     fn to_authorization_rfc_test_vector() {
@@ -190,7 +193,7 @@ mod tests {
     #[test]
     fn debug_redacts_password() {
         let creds = BasicCredentials::new("alice", "hunter2");
-        let debug = alloc::format!("{creds:?}");
+        let debug = format!("{creds:?}");
         assert!(
             !debug.contains("hunter2"),
             "password must not appear in debug"

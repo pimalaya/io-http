@@ -337,7 +337,7 @@ impl Http10Send {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::rfc1945::send::*;
 
     #[test]
     fn body_length() {

@@ -1,10 +1,11 @@
 //! HTTP request type (RFC 9110 §9).
 
+use core::fmt;
+
 use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
-use core::fmt;
 
 use url::Url;
 
@@ -71,9 +72,10 @@ impl fmt::Debug for HttpRequest {
 #[cfg(test)]
 mod tests {
     use alloc::format;
+
     use url::Url;
 
-    use super::*;
+    use crate::rfc9110::request::*;
 
     #[test]
     fn get_method_and_empty_body() {
