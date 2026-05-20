@@ -20,9 +20,9 @@ rustdoc-args = ["--cfg", "docsrs"]
 default = []
 client = []
 rustls-ring = ["client", "pimalaya-stream/rustls-ring", "dep:anyhow", "dep:pimalaya-stream"]
-rustls-aws  = ["client", "pimalaya-stream/rustls-aws",  "dep:anyhow", "dep:pimalaya-stream"]
-native-tls  = ["client", "pimalaya-stream/native-tls",  "dep:anyhow", "dep:pimalaya-stream"]
-vendored    = ["pimalaya-stream?/vendored"]
+rustls-aws = ["client", "pimalaya-stream/rustls-aws", "dep:anyhow", "dep:pimalaya-stream"]
+native-tls = ["client", "pimalaya-stream/native-tls", "dep:anyhow", "dep:pimalaya-stream"]
+vendored = ["pimalaya-stream?/vendored"]
 
 [dev-dependencies]
 env_logger = "0.11"
