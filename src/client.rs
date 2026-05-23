@@ -99,7 +99,7 @@ pub struct HttpClientStd {
 impl HttpClientStd {
     /// Builds a client around `stream`. The caller is responsible
     /// for opening the connection (TCP, TLS handshake if needed).
-    pub fn new<S: Read + Write + 'static>(stream: S) -> Self {
+    pub fn new<S: Read + Write + Send + 'static>(stream: S) -> Self {
         Self {
             stream: Box::new(stream),
         }
@@ -139,7 +139,7 @@ impl HttpClientStd {
     /// Replaces the underlying stream — useful when the server
     /// signals `Connection: close` or redirects to a different
     /// authority and a fresh transport must be opened.
-    pub fn set_stream<S: Read + Write + 'static>(&mut self, stream: S) {
+    pub fn set_stream<S: Read + Write + Send + 'static>(&mut self, stream: S) {
         self.stream = Box::new(stream);
     }
 
@@ -231,6 +231,9 @@ impl HttpClientStd {
 }
 
 /// Marker for everything the client can run against; auto-implemented
-/// for any blocking `Read + Write` impl.
-trait Stream: Read + Write {}
-impl<T: Read + Write + ?Sized> Stream for T {}
+/// for any blocking `Read + Write + Send` impl. The `Send` supertrait
+/// flows the auto-trait through the `Box<dyn Stream>` type erasure so
+/// `HttpClientStd` can travel between threads. Every concrete stream
+/// the pimalaya stack hands in is already `Send`.
+trait Stream: Read + Write + Send {}
+impl<T: Read + Write + Send + ?Sized> Stream for T {}
