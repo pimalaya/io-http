@@ -43,5 +43,8 @@ secrecy = { version = "0.10", default-features = false }
 thiserror = { version = "2", default-features = false }
 url = { version = "2.5", default-features = false }
 
+# [patch.crates-io]
+# pimalaya-stream.path = "../stream"
+
 [patch.crates-io]
 pimalaya-stream.git = "https://github.com/pimalaya/stream"

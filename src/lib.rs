@@ -14,3 +14,4 @@ pub mod rfc7617;
 pub mod rfc8615;
 pub mod rfc9110;
 pub mod rfc9112;
+pub mod sse;
