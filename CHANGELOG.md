@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Add support for HTTP/1.0.
+- Add streaming chunked-transfer reader `Http11ReadChunksStream` in `rfc9112::chunk_stream` that yields each decoded chunk as soon as it arrives instead of buffering the whole body.
+- Add W3C Server-Sent Events client: frame parser `SseFrameParser` + `SseFrame` in `sse::frame`, plus std-blocking driver `HttpClientStd::send_streaming` returning a long-lived `SseStream` iterator.
 
 ### Changed
 

@@ -25,6 +25,7 @@ use alloc::string::{String, ToString};
 use alloc::{boxed::Box, vec::Vec};
 use std::io::{self, Read, Write};
 
+use httparse::{EMPTY_HEADER, Response, Status};
 #[cfg(any(
     feature = "rustls-aws",
     feature = "rustls-ring",
@@ -36,8 +37,14 @@ use url::Url;
 
 use crate::{
     rfc1945::send::*,
-    rfc9110::{request::HttpRequest, response::HttpResponse},
-    rfc9112::send::*,
+    rfc9110::{
+        headers::{CONNECTION, TRANSFER_ENCODING},
+        request::HttpRequest,
+        response::{HttpResponse, ResponseBuilder},
+        status::StatusCode,
+    },
+    rfc9112::{chunk_stream::*, send::*, version::HTTP_11},
+    sse::frame::*,
 };
 
 const READ_BUFFER_SIZE: usize = 16 * 1024;
@@ -77,6 +84,11 @@ pub enum HttpClientStdError {
 
     #[error("HTTP server redirected to `{url}` (status `{code}`)")]
     UnexpectedRedirect { url: Url, code: u16 },
+
+    #[error("HTTP streaming requires `Transfer-Encoding: chunked` (got status `{0}`)")]
+    StreamingNotChunked(u16),
+    #[error(transparent)]
+    ChunkStream(#[from] Http11ReadChunksStreamError),
 }
 
 /// Output of [`HttpClientStd::send`] / [`HttpClientStd::send_http10`].
@@ -226,6 +238,193 @@ impl HttpClientStd {
                 }
                 Http10SendResult::Err(err) => return Err(err.into()),
             }
+        }
+    }
+}
+
+impl HttpClientStd {
+    /// Opens a streaming HTTP/1.1 response for [Server-Sent Events]:
+    /// writes `request`, reads response headers, requires
+    /// `Transfer-Encoding: chunked`, and hands the body off to the
+    /// returned [`SseStream`] iterator.
+    ///
+    /// Consumes `self` because the underlying connection becomes
+    /// dedicated to the streaming response and cannot be reused for
+    /// pipelined requests. The caller drops or closes the stream when
+    /// done. Pre-read body bytes (received in the same socket read as
+    /// the headers) are forwarded to the stream automatically.
+    ///
+    /// [Server-Sent Events]: https://html.spec.whatwg.org/multipage/server-sent-events.html
+    pub fn send_streaming(self, request: HttpRequest) -> Result<SseStream, HttpClientStdError> {
+        let HttpClientStd { mut stream } = self;
+
+        let req_bytes = request.to_http_11_vec();
+        stream.write_all(&req_bytes)?;
+
+        let mut header_buf = Vec::new();
+        let mut tmp = [0u8; READ_BUFFER_SIZE];
+
+        let (header_end, response, keep_alive) = loop {
+            let mut headers = [EMPTY_HEADER; 64];
+            let mut parsed = Response::new(&mut headers);
+
+            match parsed.parse(&header_buf) {
+                Ok(Status::Complete(n)) => {
+                    let mut builder = ResponseBuilder {
+                        version: HTTP_11.into(),
+                        ..Default::default()
+                    };
+                    if let Some(code) = parsed.code {
+                        builder.status = Some(StatusCode(code));
+                    }
+                    for header in parsed.headers.iter() {
+                        builder.header(header.name, header.value);
+                    }
+
+                    let keep_alive = match builder.get_header(CONNECTION) {
+                        Some(conn) => !conn.eq_ignore_ascii_case("close"),
+                        None => true,
+                    };
+
+                    let response = builder.build(Vec::new());
+                    break (n, response, keep_alive);
+                }
+                Ok(Status::Partial) => {}
+                Err(err) => {
+                    return Err(Http11SendError::ParseResponseHeaders(err).into());
+                }
+            }
+
+            let n = stream.read(&mut tmp)?;
+            if n == 0 {
+                return Err(Http11SendError::Eof.into());
+            }
+            header_buf.extend_from_slice(&tmp[..n]);
+        };
+
+        let chunked = response
+            .header(TRANSFER_ENCODING)
+            .is_some_and(|enc| enc.eq_ignore_ascii_case("chunked"));
+
+        if !chunked {
+            return Err(HttpClientStdError::StreamingNotChunked(*response.status));
+        }
+
+        let preread = header_buf.split_off(header_end);
+
+        Ok(SseStream {
+            stream,
+            chunk_stream: Http11ReadChunksStream::default(),
+            sse_parser: SseFrameParser::default(),
+            pending: None,
+            preread,
+            response,
+            keep_alive,
+            done: false,
+        })
+    }
+}
+
+/// Long-lived streaming HTTP/1.1 response carrying a Server-Sent
+/// Events body. Each call to [`SseStream::next_frame`] (or
+/// [`Iterator::next`]) drives the chunked-transfer decoder and the
+/// SSE frame parser, blocking on socket reads until the next event
+/// arrives or the connection closes.
+pub struct SseStream {
+    stream: Box<dyn Stream>,
+    chunk_stream: Http11ReadChunksStream,
+    sse_parser: SseFrameParser,
+    pending: Option<Vec<u8>>,
+    preread: Vec<u8>,
+    response: HttpResponse,
+    keep_alive: bool,
+    done: bool,
+}
+
+impl SseStream {
+    /// Returns the parsed response headers (body is empty since the
+    /// body is the streaming SSE channel itself).
+    pub fn response(&self) -> &HttpResponse {
+        &self.response
+    }
+
+    /// Whether the server signalled the connection can be reused
+    /// after the stream ends. SSE servers typically use
+    /// `Connection: keep-alive` and only close on shutdown.
+    pub fn keep_alive(&self) -> bool {
+        self.keep_alive
+    }
+
+    /// Returns the last-event-id seen on the stream so far, ready to
+    /// be supplied via `Last-Event-ID` on a reconnection attempt.
+    pub fn last_event_id(&self) -> Option<&str> {
+        self.sse_parser.last_event_id()
+    }
+
+    /// Drives the chunked decoder and SSE frame parser until the next
+    /// event is dispatched, blocking on socket reads. Returns
+    /// [`None`] once the server closes the connection or sends the
+    /// zero-length chunk terminator.
+    pub fn next_frame(&mut self) -> Result<Option<SseFrame>, HttpClientStdError> {
+        if self.done {
+            return Ok(None);
+        }
+
+        loop {
+            let arg = self.pending.take();
+            match self.sse_parser.resume(arg.as_deref()) {
+                SseFrameParserResult::Frame(frame) => return Ok(Some(frame)),
+                SseFrameParserResult::WantsBytes => match self.pull_chunk()? {
+                    Some(body) => self.pending = Some(body),
+                    None => {
+                        self.done = true;
+                        return Ok(None);
+                    }
+                },
+            }
+        }
+    }
+
+    /// Closes the underlying connection. Equivalent to dropping the
+    /// stream; provided for explicit shutdown at the call site.
+    pub fn close(self) {
+        drop(self);
+    }
+
+    fn pull_chunk(&mut self) -> Result<Option<Vec<u8>>, HttpClientStdError> {
+        let mut tmp = [0u8; READ_BUFFER_SIZE];
+        let preread = core::mem::take(&mut self.preread);
+        let mut arg: Option<&[u8]> = if preread.is_empty() {
+            None
+        } else {
+            Some(&preread)
+        };
+
+        loop {
+            match self.chunk_stream.resume(arg.take()) {
+                Http11ReadChunksStreamResult::Frame { body } => return Ok(Some(body)),
+                Http11ReadChunksStreamResult::Done { .. } => return Ok(None),
+                Http11ReadChunksStreamResult::WantsRead => {
+                    let n = self.stream.read(&mut tmp)?;
+                    if n == 0 {
+                        return Ok(None);
+                    }
+                    arg = Some(&tmp[..n]);
+                }
+                Http11ReadChunksStreamResult::Err(err) => return Err(err.into()),
+            }
+        }
+    }
+}
+
+impl Iterator for SseStream {
+    type Item = Result<SseFrame, HttpClientStdError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.next_frame() {
+            Ok(Some(frame)) => Some(Ok(frame)),
+            Ok(None) => None,
+            Err(err) => Some(Err(err)),
         }
     }
 }
