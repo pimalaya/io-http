@@ -2,43 +2,53 @@
 
 HTTP/1.X client library, written in Rust
 
+This library is composed of 3 feature-gated layers:
+
+- Low-level **I/O-free** coroutines: these `no_std`-compatible state machines contain the whole HTTP/1.X logic and can be used anywhere
+- Mid-level **light client**: a standard, blocking HTTP client using a `Stream: Read + Write`
+- High-level **full client**: light client + TCP connections and TLS negotiations handled for you
+
 ## Table of contents
 
 - [Features](#features)
 - [RFC coverage](#rfc-coverage)
+- [Usage](#usage)
+  - [I/O-free coroutines](#io-free-coroutines)
+  - [Light client](#light-client)
+  - [Full client](#full-client)
 - [Examples](#examples)
-  - [As a no-std coroutine library](#as-a-no-std-coroutine-library)
-  - [As a light std client (BYO stream)](#as-a-light-std-client-byo-stream)
-  - [As a full std client (TCP + TLS)](#as-a-full-std-client-tcp--tls)
-- [More examples](#more-examples)
+- [AI disclosure](#ai-disclosure)
 - [License](#license)
 - [Social](#social)
 - [Sponsoring](#sponsoring)
 
 ## Features
 
-- **I/O-free** coroutines: every HTTP exchange is exposed as a `resume(arg: Option<&[u8]>)` state machine. No sockets, no async runtime, no `std` required. Run against any blocking, async, or fuzz harness.
-- **Standard, blocking client**:
-  - Light client (requires `client` feature): `HttpClientStd::new(stream)` wraps a connected `Read + Write` stream and exposes `send` / `send_http10`. You still own TCP / TLS.
-  - Full std client (requires `rustls-ring`, `rustls-aws`, or `native-tls` feature): `HttpClientStd::connect(url, tls)` opens `http://` / `https://` URLs via [pimalaya/stream](https://github.com/pimalaya/stream) and returns a ready-to-use client.
-- **HTTP versions**: HTTP/1.0 (RFC 1945, fixed-length or read-to-EOF body) and HTTP/1.1 (RFC 9112, fixed-length, chunked, or read-to-EOF body).
+- **I/O-free** coroutines: `no_std` state machines; no sockets, no async runtime, no `std` required, drive against any blocking, async, or fuzz harness.
+- Light standard, blocking client (requires `client` feature)
+- Full standard, blocking client with **TLS** support:
+  - [Rustls](https://crates.io/crates/rustls) with ring crypto (requires `rustls-ring` feature)
+  - [Rustls](https://crates.io/crates/rustls) with aws crypto (requires `rustls-aws` feature)
+  - [Native TLS](https://crates.io/crates/native-tls) (requires `native-tls` feature)
+- **HTTP versions**: HTTP/1.0 (RFC 1945) and HTTP/1.1 (RFC 9112) with fixed-length, chunked, and read-to-EOF body strategies.
+- **Streaming**: chunked decoder (`Http11ReadChunksStream`) + W3C Server-Sent Events parser (`SseFrameParser`) + std-blocking driver (`HttpClientStd::send_streaming`).
 - **Authentication helpers**: `Authorization: Bearer <token>` (RFC 6750) and `Authorization: Basic <base64(user:pass)>` (RFC 7617).
 - **`.well-known` discovery** (RFC 8615) shipped as a dedicated coroutine.
 
-*The `io-http` library is written in [Rust](https://www.rust-lang.org/), and relies on [cargo features](https://doc.rust-lang.org/cargo/reference/features.html) to enable or disable functionalities. Default features can be found in the `features` section of the [`Cargo.toml`](https://github.com/pimalaya/io-http/blob/master/Cargo.toml), or on [docs.rs](https://docs.rs/crate/io-http/latest/features).*
+> [!TIP]
+> I/O HTTP is written in [Rust](https://www.rust-lang.org/) and uses [cargo features](https://doc.rust-lang.org/cargo/reference/features.html) to gate backend support. The default feature set is declared in [Cargo.toml](./Cargo.toml) or on [docs.rs](https://docs.rs/crate/io-http/latest/features).
 
 ## RFC coverage
 
-This library implements HTTP as I/O-agnostic coroutines: no sockets, no async runtime, no `std` required by the protocol layer.
-
-| Module   | What it covers                                                                  |
-|----------|---------------------------------------------------------------------------------|
-| [1945]   | HTTP/1.0: request/response coroutine (`Http10Send`)                             |
-| [6750]   | OAuth 2.0 Bearer token: `Authorization: Bearer <token>`                         |
-| [7617]   | HTTP Basic authentication: `Authorization: Basic <base64(user:pass)>`           |
-| [8615]   | `.well-known` URI discovery: `WellKnown` coroutine                              |
-| [9110]   | HTTP semantics: shared types `HttpRequest`, `HttpResponse`, `StatusCode`        |
-| [9112]   | HTTP/1.1: request/response coroutine (`Http11Send`), chunked transfer encoding  |
+| Module   | What it covers                                                                                                |
+|----------|---------------------------------------------------------------------------------------------------------------|
+| [1945]   | HTTP/1.0: request/response coroutine (`Http10Send`)                                                           |
+| [6750]   | OAuth 2.0 Bearer token: `Authorization: Bearer <token>`                                                       |
+| [7617]   | HTTP Basic authentication: `Authorization: Basic <base64(user:pass)>`                                         |
+| [8615]   | `.well-known` URI discovery: `WellKnown` coroutine                                                            |
+| [9110]   | HTTP semantics: shared types `HttpRequest`, `HttpResponse`, `StatusCode`, `HttpSendOutput`, `HttpSendYield`   |
+| [9112]   | HTTP/1.1: request/response (`Http11Send`), response-head (`Http11ReadHeaders`), chunked transfer (whole-body + streaming) |
+| `sse`    | W3C Server-Sent Events frame parser (HTML Living Standard)                                                    |
 
 [1945]: https://www.rfc-editor.org/rfc/rfc1945
 [6750]: https://www.rfc-editor.org/rfc/rfc6750
@@ -47,20 +57,16 @@ This library implements HTTP as I/O-agnostic coroutines: no sockets, no async ru
 [9110]: https://www.rfc-editor.org/rfc/rfc9110
 [9112]: https://www.rfc-editor.org/rfc/rfc9112
 
-## Examples
+## Usage
 
-`io-http` can be consumed three ways, depending on how much of the I/O stack you want to own. Each mode is gated by cargo features.
+I/O-HTTP can be consumed three ways, depending on how much of the I/O stack you want to own. Each mode is gated by cargo features.
 
-Whichever mode you pick, every coroutine exposes `resume(arg: Option<&[u8]>)` returning a result enum with four shapes:
+Whichever mode you pick, every coroutine implements the `HttpCoroutine` trait. Its `resume(arg: Option<&[u8]>)` method returns a `HttpCoroutineState<Yield, Return>` with two variants:
 
-- `WantsRead`: caller reads more bytes from the socket and feeds them back on the next call. Pass `Some(&[])` to signal EOF.
-- `WantsWrite(Vec<u8>)`: caller writes these bytes to the socket. The next call typically passes `None`.
-- `Ok { … }`: terminal success.
-- `Err { … }`: terminal failure.
+- `Yielded(Y)`: intermediate. `Y` is the per-coroutine yield type (e.g. `HttpYield::WantsRead` / `HttpYield::WantsWrite(Vec<u8>)` for most coroutines; `HttpSendYield::WantsRedirect { … }` for `Http*Send`; `SseFrameParserYield::Frame(SseFrame)` for the SSE parser).
+- `Complete(R)`: terminal. By convention `R = Result<Output, Error>` carrying the operation's final value.
 
-`Http10Send` / `Http11Send` also expose a `WantsRedirect { url, response, … }` variant; follow the redirect by building a new coroutine against `url` (possibly on a new connection).
-
-### As a no-std coroutine library
+### I/O-free coroutines
 
 No features required: works in `#![no_std]`, no sockets, no async runtime. You own the loop and the bytes; the library only produces request bytes and consumes server responses.
 
@@ -70,8 +76,9 @@ Send an HTTP/1.1 request against an async Tokio + rustls stack (the same shape w
 use std::sync::Arc;
 
 use io_http::{
-    rfc9110::request::HttpRequest,
-    rfc9112::send::{Http11Send, Http11SendResult},
+    coroutine::*,
+    rfc9110::{request::HttpRequest, send::HttpSendYield},
+    rfc9112::send::Http11Send,
 };
 use rustls::ClientConfig;
 use rustls_platform_verifier::ConfigVerifierExt;
@@ -104,14 +111,18 @@ async fn main() {
 
     let response = loop {
         match send.resume(arg.take()) {
-            Http11SendResult::Ok { response, .. } => break response,
-            Http11SendResult::WantsRead => {
+            HttpCoroutineState::Complete(Ok(out)) => break out.response,
+            HttpCoroutineState::Complete(Err(err)) => panic!("{err}"),
+            HttpCoroutineState::Yielded(HttpSendYield::WantsRead) => {
                 let n = stream.read(&mut buf).await.unwrap();
                 arg = Some(&buf[..n]);
             }
-            Http11SendResult::WantsWrite(bytes) => stream.write_all(&bytes).await.unwrap(),
-            Http11SendResult::WantsRedirect { url, .. } => panic!("redirect to {url}"),
-            Http11SendResult::Err(err) => panic!("{err}"),
+            HttpCoroutineState::Yielded(HttpSendYield::WantsWrite(bytes)) => {
+                stream.write_all(&bytes).await.unwrap();
+            }
+            HttpCoroutineState::Yielded(HttpSendYield::WantsRedirect { url, .. }) => {
+                panic!("redirect to {url}");
+            }
         }
     };
 
@@ -119,9 +130,9 @@ async fn main() {
 }
 ```
 
-### As a light std client (BYO stream)
+### Light client
 
-Enable the `client` feature. `HttpClientStd::new(stream)` wraps any blocking `Read + Write` and exposes `send` / `send_http10`. You still open the TCP socket and run TLS yourself, and hand over a ready-to-talk stream; the client takes it from there.
+Enable the `client` feature. `HttpClientStd::new(stream)` wraps any blocking `Read + Write` and exposes `send` / `send_http10` / `send_streaming`. You still open the TCP socket and run TLS yourself, then hand over a ready-to-talk stream; the client takes it from there.
 
 ```toml,ignore
 [dependencies]
@@ -155,7 +166,7 @@ let output = client.send(request)?;
 println!("{} {}", output.response.version, *output.response.status);
 ```
 
-### As a full std client (TCP + TLS)
+### Full client
 
 Enable one of the TLS feature flags: `rustls-ring` (default), `rustls-aws`, or `native-tls`. `HttpClientStd::connect(url, tls)` opens `http://` (plain TCP) or `https://` (implicit TLS) via [pimalaya/stream](https://github.com/pimalaya/stream), returning a ready-to-use client.
 
@@ -181,11 +192,11 @@ let output = client.send(request)?;
 println!("{} {}", output.response.version, *output.response.status);
 ```
 
-*See complete examples at [./examples](https://github.com/pimalaya/io-http/blob/master/examples).*
+## Examples
 
-## More examples
+See complete examples at [./examples](https://github.com/pimalaya/io-http/blob/master/examples).
 
-Have a look at projects built on top of this library:
+Have also a look at real-world projects built on top of this library:
 
 - [io-jmap](https://github.com/pimalaya/io-jmap): Set of I/O-free Rust coroutines to manage JMAP sessions
 - [io-addressbook](https://github.com/pimalaya/io-addressbook): Set of I/O-free coroutines to manage contacts
@@ -193,6 +204,26 @@ Have a look at projects built on top of this library:
 - [io-starttls](https://github.com/pimalaya/io-starttls): I/O-free Rust coroutine to upgrade any plain stream to a secure one
 - [Cardamum](https://github.com/pimalaya/cardamum): CLI to manage contacts
 - [Ortie](https://github.com/pimalaya/ortie): CLI to manage OAuth access tokens
+
+## AI disclosure
+
+This project is developed with AI assistance. This section documents how, so users and downstream packagers can make informed decisions.
+
+- **Tools**: Claude Code (Anthropic), Opus 4.7, invoked locally with a persistent project-scoped memory and a small set of repo-specific rules.
+
+- **Used for**: Refactors, mechanical multi-file edits, boilerplate (feature gates, error enums, derive macros, trait impls), test scaffolding, doc polish, exploratory design conversations.
+
+- **Not used for**: Engineering, critical code, git manipulation (commit, merge, rebase…), real-world tests.
+
+- **Verification**: Every AI-assisted change is read, compiled, tested, and formatted before commit (`nix develop --command cargo check / cargo test / cargo
+fmt`). Behavioural correctness is verified against the relevant RFC or upstream spec, not assumed from the model output. Tests are never adjusted to fit
+AI-generated code; the code is adjusted to fit correct behaviour.
+
+- **Limitations**: AI models occasionally produce code that compiles and passes tests but is subtly wrong: off-by-one errors, missed edge cases, plausible
+but nonexistent APIs, stale RFC references. The verification workflow catches most of this; it does not catch all of it. Bug reports are welcome and taken
+seriously.
+
+- **Last reviewed**: 30/05/2026
 
 ## License
 
@@ -226,5 +257,5 @@ If you appreciate the project, feel free to donate using one of the following pr
 [![Ko-fi](https://img.shields.io/badge/-Ko--fi-ff5e5a?logo=Ko-fi&logoColor=ffffff)](https://ko-fi.com/soywod)
 [![Buy Me a Coffee](https://img.shields.io/badge/-Buy%20Me%20a%20Coffee-ffdd00?logo=Buy%20Me%20A%20Coffee&logoColor=000000)](https://www.buymeacoffee.com/soywod)
 [![Liberapay](https://img.shields.io/badge/-Liberapay-f6c915?logo=Liberapay&logoColor=222222)](https://liberapay.com/soywod)
-[![thanks.dev](https://img.shields.io/badge/-thanks.dev-000000?logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQuMDk3IiBoZWlnaHQ9IjE3LjU5NyIgY2xhc3M9InctMzYgbWwtMiBsZzpteC0wIHByaW50Om14LTAgcHJpbnQ6aW52ZXJ0IiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPjxwYXRoIGQ9Ik05Ljc4MyAxNy41OTdINy4zOThjLTEuMTY4IDAtMi4wOTItLjI5Ny0yLjc3My0uODktLjY4LS41OTMtMS4wMi0xLjQ2Mi0xLjAyLTIuNjA2di0xLjM0NmMwLTEuMDE4LS4yMjctMS43NS0uNjc4LTIuMTk1LS40NTItLjQ0Ni0xLjIzMi0uNjY5LTIuMzQtLjY2OUgwVjcuNzA1aC41ODdjMS4xMDggMCAxLjg4OC0uMjIyIDIuMzQtLjY2OC40NTEtLjQ0Ni42NzctMS4xNzcuNjc3LTIuMTk1VjMuNDk2YzAtMS4xNDQuMzQtMi4wMTMgMS4wMjEtMi42MDZDNS4zMDUuMjk3IDYuMjMgMCA3LjM5OCAwaDIuMzg1djEuOTg3aC0uOTg1Yy0uMzYxIDAtLjY4OC4wMjctLjk4LjA4MmExLjcxOSAxLjcxOSAwIDAgMC0uNzM2LjMwN2MtLjIwNS4xNTYtLjM1OC4zODQtLjQ2LjY4Mi0uMTAzLjI5OC0uMTU0LjY4Mi0uMTU0IDEuMTUxVjUuMjNjMCAuODY3LS4yNDkgMS41ODYtLjc0NSAyLjE1NS0uNDk3LjU2OS0xLjE1OCAxLjAwNC0xLjk4MyAxLjMwNXYuMjE3Yy44MjUuMyAxLjQ4Ni43MzYgMS45ODMgMS4zMDUuNDk2LjU3Ljc0NSAxLjI4Ny43NDUgMi4xNTR2MS4wMjFjMCAuNDcuMDUxLjg1NC4xNTMgMS4xNTIuMTAzLjI5OC4yNTYuNTI1LjQ2MS42ODIuMTkzLjE1Ny40MzcuMjYuNzMyLjMxMi4yOTUuMDUuNjIzLjA3Ni45ODQuMDc2aC45ODVabTE0LjMxNC03LjcwNmgtLjU4OGMtMS4xMDggMC0xLjg4OC4yMjMtMi4zNC42NjktLjQ1LjQ0NS0uNjc3IDEuMTc3LS42NzcgMi4xOTVWMTQuMWMwIDEuMTQ0LS4zNCAyLjAxMy0xLjAyIDIuNjA2LS42OC41OTMtMS42MDUuODktMi43NzQuODloLTIuMzg0di0xLjk4OGguOTg0Yy4zNjIgMCAuNjg4LS4wMjcuOTgtLjA4LjI5Mi0uMDU1LjUzOC0uMTU3LjczNy0uMzA4LjIwNC0uMTU3LjM1OC0uMzg0LjQ2LS42ODIuMTAzLS4yOTguMTU0LS42ODIuMTU0LTEuMTUydi0xLjAyYzAtLjg2OC4yNDgtMS41ODYuNzQ1LTIuMTU1LjQ5Ny0uNTcgMS4xNTgtMS4wMDQgMS45ODMtMS4zMDV2LS4yMTdjLS44MjUtLjMwMS0xLjQ4Ni0uNzM2LTEuOTgzLTEuMzA1LS40OTctLjU3LS43NDUtMS4yODgtLjc0NS0yLjE1NXYtMS4wMmMwLS40Ny0uMDUxLS44NTQtLjE1NC0xLjE1Mi0uMTAyLS4yOTgtLjI1Ni0uNTI2LS40Ni0uNjgyYTEuNzE5IDEuNzE5IDAgMCAwLS43MzctLjMwNyA1LjM5NSA1LjM5NSAwIDAgMC0uOTgtLjA4MmgtLjk4NFYwaDIuMzg0YzEuMTY5IDAgMi4wOTMuMjk3IDIuNzc0Ljg5LjY4LjU5MyAxLjAyIDEuNDYyIDEuMDIgMi42MDZ2MS4zNDZjMCAxLjAxOC4yMjYgMS43NS42NzggMi4xOTUuNDUxLjQ0NiAxLjIzMS42NjggMi4zNC42NjhoLjU4N3oiIGZpbGw9IiNmZmYiLz48L3N2Zz4=)](https://thanks.dev/soywod)
+[![thanks.dev](https://img.shields.io/badge/-thanks.dev-000000?logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQuMDk3IiBoZWlnaHQ9IjE3LjU5NyIgY2xhc3M9InctMzYgbWwtMiBsZzpteC0wIHByaW50Om14LTAgcHJpbnQ6aW52ZXJ0IiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPjxwYXRoIGQ9Ik05Ljc4MyAxNy41OTdINy4zOThjLTEuMTY4IDAtMi4wOTItLjI5Ny0yLjc3My0uODktLjY4LS41OTMtMS4wMi0xLjQ2Mi0xLjAyLTIuNjA2di0xLjM0NmMwLTEuMDE4LS4yMjctMS43NS0uNjc4LTIuMTk1LS40NTItLjQ0Ni0xLjIzMi0uNjY5LTIuMzQtLjY2OUgwVjcuNzA1aC41ODdjMS4xMDggMCAxLjg4OC0uMjIyIDIuMzQtLjY2OC40NTEtLjQ0Ni42NzctMS4xNzcuNjc3LTIuMTk1VjMuNDk2YzAtMS4xNDQuMzQtMi4wMTMgMS4wMjEtMi42MDZDNS4zMDUuMjk3IDYuMjMgMCA3LjM5OCAwaDIuMzg1djEuOTg3aC0uOTg1Yy0uMzYxIDAtLjY4OC4wMjctLjk4LjA4MmExLjcxOSAxLjcxOSAwIDAgMC0uNzM2LjMwN2MtLjIwNS4xNTYtLjM1OC4zODQtLjQ2LjY4Mi0uMTAzLjI5OC0uMTU0LjY4Mi0uMTU0IDEuMTUxVjUuMjNjMCAuODY3LS4yNDkgMS41ODYtLjc0NSAyLjE1NS0uNDk3LjU2OS0xLjE1OCAxLjAwNC0xLjk4MyAxLjMwNXYuMjE3Yy44MjUuMyAxLjQ4Ni43MzYgMS45ODMgMS4zMDUuNDk2LjU3Ljc0NSAxLjI4Ny43NDUgMi4xNTR2MS4wMjFjMCAuNDcuMDUxLjg1NC4xNTMgMS4xNTIuMTAzLjI5OC4yNTYuNTI1LjQ2MS42ODIuMTkzLjE1Ny40MzcuMjYuNzMyLjMxMi4yOTUuMDUuNjIzLjA3Ni45ODQuMDc2aC45ODVabTE0LjMxNC03LjcwNmgtLjU4OGMtMS4xMDggMC0xLjg4OC4yMjMtMi4zNC42NjktLjQ1LjQ0Ni0uNjc3IDEuMTc3LS42NzcgMi4xOTVWMTQuMWMwIDEuMTQ0LS4zNCAyLjAxMy0xLjAyIDIuNjA2LS42OC41OTMtMS42MDUuODktMi43NzQuODloLTIuMzg0di0xLjk4OGguOTg0Yy4zNjIgMCAuNjg4LS4wMjcuOTgtLjA4LjI5Mi0uMDU1LjUzOC0uMTU3LjczNy0uMzA4LjIwNC0uMTU3LjM1OC0uMzg0LjQ2LS42ODIuMTAzLS4yOTguMTU0LS42ODIuMTU0LTEuMTUydi0xLjAyYzAtLjg2OC4yNDgtMS41ODYuNzQ1LTIuMTU1LjQ5Ny0uNTcgMS4xNTgtMS4wMDQgMS45ODMtMS4zMDV2LS4yMTdjLS44MjUtLjMwMS0xLjQ4Ni0uNzM2LTEuOTgzLTEuMzA1LS40OTctLjU3LS43NDUtMS4yODgtLjc0NS0yLjE1NXYtMS4wMmMwLS40Ny0uMDUxLS44NTQtLjE1NC0xLjE1Mi0uMTAyLS4yOTgtLjI1Ni0uNTI2LS40Ni0uNjgyYTEuNzE5IDEuNzE5IDAgMCAwLS43MzctLjMwNyA1LjM5NSA1LjM5NSAwIDAgMC0uOTgtLjA4MmgtLjk4NFYwaDIuMzg0YzEuMTY5IDAgMi4wOTMuMjk3IDIuNzc0Ljg5LjY4LjU5MyAxLjAyIDEuNDYyIDEuMDIgMi42MDZ2MS4zNDZjMCAxLjAxOC4yMjYgMS43NS42NzggMi4xOTUuNDUxLjQ0NiAxLjIzMS42NjggMi4zNC42NjhoLjU4N3oiIGZpbGw9IiNmZmYiLz48L3N2Zz4=)](https://thanks.dev/soywod)
 [![PayPal](https://img.shields.io/badge/-PayPal-0079c1?logo=PayPal&logoColor=ffffff)](https://www.paypal.com/paypalme/soywod)

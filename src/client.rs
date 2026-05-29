@@ -1,8 +1,8 @@
 //! # Standard, blocking HTTP/1.X client
 //!
-//! Holds a single boxed [`HttpStream`] (any blocking `Read + Write`
-//! impl) and exposes one method per common coroutine. HTTP has no
-//! long-lived session context — each [`send`] / [`send_http10`] is
+//! Holds a single boxed `Read + Write + Send` stream and exposes one
+//! method per common coroutine. HTTP has no
+//! long-lived session context: each [`send`] / [`send_http10`] is
 //! self-contained.
 //!
 //! The bare [`new`] constructor takes a pre-connected stream;
@@ -25,7 +25,6 @@ use alloc::string::{String, ToString};
 use alloc::{boxed::Box, vec::Vec};
 use std::io::{self, Read, Write};
 
-use httparse::{EMPTY_HEADER, Response, Status};
 #[cfg(any(
     feature = "rustls-aws",
     feature = "rustls-ring",
@@ -36,14 +35,15 @@ use thiserror::Error;
 use url::Url;
 
 use crate::{
+    coroutine::*,
     rfc1945::send::*,
     rfc9110::{
-        headers::{CONNECTION, TRANSFER_ENCODING},
+        headers::TRANSFER_ENCODING,
         request::HttpRequest,
-        response::{HttpResponse, ResponseBuilder},
-        status::StatusCode,
+        response::HttpResponse,
+        send::{HttpSendOutput, HttpSendYield},
     },
-    rfc9112::{chunk_stream::*, send::*, version::HTTP_11},
+    rfc9112::{chunk_stream::*, read_headers::*, send::*},
     sse::frame::*,
 };
 
@@ -91,19 +91,8 @@ pub enum HttpClientStdError {
     ChunkStream(#[from] Http11ReadChunksStreamError),
 }
 
-/// Output of [`HttpClientStd::send`] / [`HttpClientStd::send_http10`].
-#[derive(Clone, Debug)]
-pub struct HttpSendOutput {
-    /// The parsed HTTP response.
-    pub response: HttpResponse,
-    /// Bytes pre-read past the response body — the caller should feed
-    /// these to the next coroutine.
-    pub remaining: Vec<u8>,
-    /// Whether the server indicated the connection can be reused.
-    pub keep_alive: bool,
-}
-
-/// Std-blocking HTTP client wrapping a single [`HttpStream`].
+/// Std-blocking HTTP client wrapping a single boxed `Read + Write +
+/// Send` stream.
 pub struct HttpClientStd {
     stream: Box<dyn Stream>,
 }
@@ -155,6 +144,39 @@ impl HttpClientStd {
         self.stream = Box::new(stream);
     }
 
+    /// Drives any standard-shape coroutine (`Yield = HttpYield`,
+    /// `Return = Result<Output, Error>`) against the wrapped stream
+    /// until it terminates.
+    ///
+    /// Coroutines that need richer Yield variants (e.g. [`Http11Send`]
+    /// with [`HttpSendYield::WantsRedirect`], or
+    /// [`Http11ReadChunksStream`] / [`SseFrameParser`] for streaming)
+    /// are driven by their own per-method loops on this client; see
+    /// [`Self::send`], [`Self::send_streaming`], and [`SseStream`].
+    pub fn run<C, T, E>(&mut self, mut coroutine: C) -> Result<T, HttpClientStdError>
+    where
+        C: HttpCoroutine<Yield = HttpYield, Return = Result<T, E>>,
+        HttpClientStdError: From<E>,
+    {
+        let mut buf = [0u8; READ_BUFFER_SIZE];
+        let mut arg: Option<&[u8]> = None;
+
+        loop {
+            match coroutine.resume(arg.take()) {
+                HttpCoroutineState::Complete(Ok(out)) => return Ok(out),
+                HttpCoroutineState::Complete(Err(err)) => return Err(err.into()),
+                HttpCoroutineState::Yielded(HttpYield::WantsRead) => {
+                    let n = self.stream.read(&mut buf)?;
+                    arg = Some(&buf[..n]);
+                }
+                HttpCoroutineState::Yielded(HttpYield::WantsWrite(bytes)) => {
+                    self.stream.write_all(&bytes)?;
+                    arg = None;
+                }
+            }
+        }
+    }
+
     /// Runs [`Http11Send`] (RFC 9112): sends `request` over the
     /// underlying stream and reads back the response. Returns
     /// [`HttpClientStdError::UnexpectedRedirect`] on 3xx; the caller
@@ -165,33 +187,25 @@ impl HttpClientStd {
         let mut arg: Option<&[u8]> = None;
 
         loop {
-            match coroutine.resume(arg) {
-                Http11SendResult::Ok {
-                    response,
-                    remaining,
-                    keep_alive,
-                } => {
-                    return Ok(HttpSendOutput {
-                        response,
-                        remaining,
-                        keep_alive,
-                    });
-                }
-                Http11SendResult::WantsRead => {
+            match coroutine.resume(arg.take()) {
+                HttpCoroutineState::Complete(Ok(out)) => return Ok(out),
+                HttpCoroutineState::Complete(Err(err)) => return Err(err.into()),
+                HttpCoroutineState::Yielded(HttpSendYield::WantsRead) => {
                     let n = self.stream.read(&mut buf)?;
                     arg = Some(&buf[..n]);
                 }
-                Http11SendResult::WantsWrite(bytes) => {
+                HttpCoroutineState::Yielded(HttpSendYield::WantsWrite(bytes)) => {
                     self.stream.write_all(&bytes)?;
                     arg = None;
                 }
-                Http11SendResult::WantsRedirect { url, response, .. } => {
+                HttpCoroutineState::Yielded(HttpSendYield::WantsRedirect {
+                    url, response, ..
+                }) => {
                     return Err(HttpClientStdError::UnexpectedRedirect {
                         url,
                         code: *response.status,
                     });
                 }
-                Http11SendResult::Err(err) => return Err(err.into()),
             }
         }
     }
@@ -210,33 +224,25 @@ impl HttpClientStd {
         let mut arg: Option<&[u8]> = None;
 
         loop {
-            match coroutine.resume(arg) {
-                Http10SendResult::Ok {
-                    response,
-                    remaining,
-                    keep_alive,
-                } => {
-                    return Ok(HttpSendOutput {
-                        response,
-                        remaining,
-                        keep_alive,
-                    });
-                }
-                Http10SendResult::WantsRead => {
+            match coroutine.resume(arg.take()) {
+                HttpCoroutineState::Complete(Ok(out)) => return Ok(out),
+                HttpCoroutineState::Complete(Err(err)) => return Err(err.into()),
+                HttpCoroutineState::Yielded(HttpSendYield::WantsRead) => {
                     let n = self.stream.read(&mut buf)?;
                     arg = Some(&buf[..n]);
                 }
-                Http10SendResult::WantsWrite(bytes) => {
+                HttpCoroutineState::Yielded(HttpSendYield::WantsWrite(bytes)) => {
                     self.stream.write_all(&bytes)?;
                     arg = None;
                 }
-                Http10SendResult::WantsRedirect { url, response, .. } => {
+                HttpCoroutineState::Yielded(HttpSendYield::WantsRedirect {
+                    url, response, ..
+                }) => {
                     return Err(HttpClientStdError::UnexpectedRedirect {
                         url,
                         code: *response.status,
                     });
                 }
-                Http10SendResult::Err(err) => return Err(err.into()),
             }
         }
     }
@@ -261,65 +267,48 @@ impl HttpClientStd {
         let req_bytes = request.to_http_11_vec();
         stream.write_all(&req_bytes)?;
 
-        let mut header_buf = Vec::new();
-        let mut tmp = [0u8; READ_BUFFER_SIZE];
+        let mut read_headers = Http11ReadHeaders::default();
+        let mut buf = [0u8; READ_BUFFER_SIZE];
+        let mut arg: Option<&[u8]> = None;
 
-        let (header_end, response, keep_alive) = loop {
-            let mut headers = [EMPTY_HEADER; 64];
-            let mut parsed = Response::new(&mut headers);
-
-            match parsed.parse(&header_buf) {
-                Ok(Status::Complete(n)) => {
-                    let mut builder = ResponseBuilder {
-                        version: HTTP_11.into(),
-                        ..Default::default()
-                    };
-                    if let Some(code) = parsed.code {
-                        builder.status = Some(StatusCode(code));
-                    }
-                    for header in parsed.headers.iter() {
-                        builder.header(header.name, header.value);
-                    }
-
-                    let keep_alive = match builder.get_header(CONNECTION) {
-                        Some(conn) => !conn.eq_ignore_ascii_case("close"),
-                        None => true,
-                    };
-
-                    let response = builder.build(Vec::new());
-                    break (n, response, keep_alive);
+        let out = loop {
+            match read_headers.resume(arg.take()) {
+                HttpCoroutineState::Complete(Ok(out)) => break out,
+                HttpCoroutineState::Complete(Err(err)) => {
+                    return Err(Http11SendError::from(err).into());
                 }
-                Ok(Status::Partial) => {}
-                Err(err) => {
-                    return Err(Http11SendError::ParseResponseHeaders(err).into());
+                HttpCoroutineState::Yielded(HttpYield::WantsRead) => {
+                    let n = stream.read(&mut buf)?;
+                    if n == 0 {
+                        return Err(Http11SendError::Eof.into());
+                    }
+                    arg = Some(&buf[..n]);
+                }
+                HttpCoroutineState::Yielded(HttpYield::WantsWrite(_)) => {
+                    unreachable!("Http11ReadHeaders never writes");
                 }
             }
-
-            let n = stream.read(&mut tmp)?;
-            if n == 0 {
-                return Err(Http11SendError::Eof.into());
-            }
-            header_buf.extend_from_slice(&tmp[..n]);
         };
 
-        let chunked = response
+        let chunked = out
+            .response
             .header(TRANSFER_ENCODING)
             .is_some_and(|enc| enc.eq_ignore_ascii_case("chunked"));
 
         if !chunked {
-            return Err(HttpClientStdError::StreamingNotChunked(*response.status));
+            return Err(HttpClientStdError::StreamingNotChunked(
+                *out.response.status,
+            ));
         }
-
-        let preread = header_buf.split_off(header_end);
 
         Ok(SseStream {
             stream,
             chunk_stream: Http11ReadChunksStream::default(),
             sse_parser: SseFrameParser::default(),
             pending: None,
-            preread,
-            response,
-            keep_alive,
+            preread: out.remaining,
+            response: out.response,
+            keep_alive: out.keep_alive,
             done: false,
         })
     }
@@ -373,14 +362,19 @@ impl SseStream {
         loop {
             let arg = self.pending.take();
             match self.sse_parser.resume(arg.as_deref()) {
-                SseFrameParserResult::Frame(frame) => return Ok(Some(frame)),
-                SseFrameParserResult::WantsBytes => match self.pull_chunk()? {
-                    Some(body) => self.pending = Some(body),
-                    None => {
-                        self.done = true;
-                        return Ok(None);
+                HttpCoroutineState::Yielded(SseFrameParserYield::Frame(frame)) => {
+                    return Ok(Some(frame));
+                }
+                HttpCoroutineState::Yielded(SseFrameParserYield::WantsBytes) => {
+                    match self.pull_chunk()? {
+                        Some(body) => self.pending = Some(body),
+                        None => {
+                            self.done = true;
+                            return Ok(None);
+                        }
                     }
-                },
+                }
+                HttpCoroutineState::Complete(never) => match never {},
             }
         }
     }
@@ -402,16 +396,18 @@ impl SseStream {
 
         loop {
             match self.chunk_stream.resume(arg.take()) {
-                Http11ReadChunksStreamResult::Frame { body } => return Ok(Some(body)),
-                Http11ReadChunksStreamResult::Done { .. } => return Ok(None),
-                Http11ReadChunksStreamResult::WantsRead => {
+                HttpCoroutineState::Yielded(Http11ReadChunksStreamYield::Frame { body }) => {
+                    return Ok(Some(body));
+                }
+                HttpCoroutineState::Complete(Ok(_remaining)) => return Ok(None),
+                HttpCoroutineState::Yielded(Http11ReadChunksStreamYield::WantsRead) => {
                     let n = self.stream.read(&mut tmp)?;
                     if n == 0 {
                         return Ok(None);
                     }
                     arg = Some(&tmp[..n]);
                 }
-                Http11ReadChunksStreamResult::Err(err) => return Err(err.into()),
+                HttpCoroutineState::Complete(Err(err)) => return Err(err.into()),
             }
         }
     }

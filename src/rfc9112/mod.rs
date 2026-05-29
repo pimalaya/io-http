@@ -9,6 +9,7 @@
 
 pub mod chunk;
 pub mod chunk_stream;
+pub mod read_headers;
 pub mod request;
 pub mod send;
 pub mod version;

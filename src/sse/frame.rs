@@ -3,14 +3,19 @@
 //! <https://html.spec.whatwg.org/multipage/server-sent-events.html>).
 //!
 //! Bytes are appended via [`SseFrameParser::resume`]; each call
-//! returns the next dispatched event as an [`SseFrame`], or
-//! [`SseFrameParserResult::WantsBytes`] when more input is needed.
+//! returns the next dispatched event as a
+//! [`SseFrameParserYield::Frame`], or
+//! [`SseFrameParserYield::WantsBytes`] when more input is needed.
 //! The parser is driven by a streaming HTTP body coroutine (typically
 //! [`crate::rfc9112::chunk_stream::Http11ReadChunksStream`]); the
 //! caller forwards each decoded chunk into this parser and pumps it
 //! until it asks for more.
+//!
+//! The parser never reaches a terminal state; its `Return` is
+//! [`Infallible`]. The outer driver stops resuming when the underlying
+//! body stream closes.
 
-use core::{mem, str};
+use core::{convert::Infallible, mem, str};
 
 use alloc::{
     string::{String, ToString},
@@ -18,6 +23,8 @@ use alloc::{
 };
 
 use log::trace;
+
+use crate::coroutine::*;
 
 /// One dispatched Server-Sent Event.
 ///
@@ -36,9 +43,12 @@ pub struct SseFrame {
     pub retry: Option<u64>,
 }
 
-/// Result returned by [`SseFrameParser::resume`].
+/// Per-step yield emitted by [`SseFrameParser`].
+///
+/// The parser is line-oriented and infallible: bad fields are silently
+/// ignored per spec, so no `Err` arm is ever produced.
 #[derive(Debug)]
-pub enum SseFrameParserResult {
+pub enum SseFrameParserYield {
     /// A complete event was dispatched.
     Frame(SseFrame),
     /// The parser needs more bytes from the body stream.
@@ -62,13 +72,22 @@ pub struct SseFrameParser {
 }
 
 impl SseFrameParser {
-    /// Advances the parser.
-    ///
-    /// Pass [`None`] when there is no new data to provide (re-entry
-    /// after a [`SseFrameParserResult::Frame`] was consumed). Pass
-    /// `Some(data)` with bytes pulled from the body coroutine after a
-    /// [`SseFrameParserResult::WantsBytes`].
-    pub fn resume(&mut self, arg: Option<&[u8]>) -> SseFrameParserResult {
+    /// Returns the current last-event-id, set by the most recent `id:`
+    /// field. Persists across dispatched frames and is preserved here
+    /// so a reconnecting caller can supply it via the
+    /// `Last-Event-ID` request header.
+    pub fn last_event_id(&self) -> Option<&str> {
+        self.last_event_id.as_deref()
+    }
+}
+
+impl HttpCoroutine for SseFrameParser {
+    type Yield = SseFrameParserYield;
+    /// The parser never completes; the outer driver stops resuming
+    /// when the underlying body stream is done.
+    type Return = Infallible;
+
+    fn resume(&mut self, arg: Option<&[u8]>) -> HttpCoroutineState<Self::Yield, Self::Return> {
         if let Some(data) = arg {
             trace!("resume with {} bytes", data.len());
             self.buf.extend_from_slice(data);
@@ -83,7 +102,7 @@ impl SseFrameParser {
 
         loop {
             let Some((line, consumed)) = next_line(&self.buf) else {
-                return SseFrameParserResult::WantsBytes;
+                return HttpCoroutineState::Yielded(SseFrameParserYield::WantsBytes);
             };
 
             let line_bytes = self.buf[..line].to_vec();
@@ -104,7 +123,7 @@ impl SseFrameParser {
                     id: self.last_event_id.clone(),
                     retry: self.retry.take(),
                 };
-                return SseFrameParserResult::Frame(frame);
+                return HttpCoroutineState::Yielded(SseFrameParserYield::Frame(frame));
             }
 
             if line_bytes.first() == Some(&b':') {
@@ -140,14 +159,6 @@ impl SseFrameParser {
                 _ => trace!("ignore unknown field `{name}`"),
             }
         }
-    }
-
-    /// Returns the current last-event-id, set by the most recent `id:`
-    /// field. Persists across dispatched frames and is preserved here
-    /// so a reconnecting caller can supply it via the
-    /// `Last-Event-ID` request header.
-    pub fn last_event_id(&self) -> Option<&str> {
-        self.last_event_id.as_deref()
     }
 }
 
@@ -211,8 +222,14 @@ mod tests {
         let mut arg: Option<&[u8]> = Some(stream);
         let mut frames = Vec::new();
 
-        while let SseFrameParserResult::Frame(frame) = parser.resume(arg.take()) {
-            frames.push(frame);
+        loop {
+            match parser.resume(arg.take()) {
+                HttpCoroutineState::Yielded(SseFrameParserYield::Frame(frame)) => {
+                    frames.push(frame)
+                }
+                HttpCoroutineState::Yielded(SseFrameParserYield::WantsBytes) => break,
+                HttpCoroutineState::Complete(never) => match never {},
+            }
         }
 
         frames
@@ -276,8 +293,14 @@ mod tests {
         let mut arg: Option<&[u8]> = Some(b"id: 1\ndata: a\n\ndata: b\n\n");
         let mut frames = Vec::new();
 
-        while let SseFrameParserResult::Frame(frame) = parser.resume(arg.take()) {
-            frames.push(frame);
+        loop {
+            match parser.resume(arg.take()) {
+                HttpCoroutineState::Yielded(SseFrameParserYield::Frame(frame)) => {
+                    frames.push(frame)
+                }
+                HttpCoroutineState::Yielded(SseFrameParserYield::WantsBytes) => break,
+                HttpCoroutineState::Complete(never) => match never {},
+            }
         }
 
         assert_eq!(frames[0].id.as_deref(), Some("1"));
@@ -292,8 +315,11 @@ mod tests {
         let arg: Option<&[u8]> = Some(stream);
 
         match parser.resume(arg) {
-            SseFrameParserResult::Frame(_) => {}
-            SseFrameParserResult::WantsBytes => unreachable!("wants bytes"),
+            HttpCoroutineState::Yielded(SseFrameParserYield::Frame(_)) => {}
+            HttpCoroutineState::Yielded(SseFrameParserYield::WantsBytes) => {
+                unreachable!("wants bytes");
+            }
+            HttpCoroutineState::Complete(never) => match never {},
         }
 
         assert_eq!(parser.last_event_id(), None);
@@ -337,17 +363,18 @@ mod tests {
 
         loop {
             match parser.resume(arg.take()) {
-                SseFrameParserResult::Frame(frame) => {
+                HttpCoroutineState::Yielded(SseFrameParserYield::Frame(frame)) => {
                     frames.push(frame);
                     break;
                 }
-                SseFrameParserResult::WantsBytes => {
+                HttpCoroutineState::Yielded(SseFrameParserYield::WantsBytes) => {
                     if arg.is_none() {
                         arg = Some(b"lo\n\n");
                     } else {
                         break;
                     }
                 }
+                HttpCoroutineState::Complete(never) => match never {},
             }
         }
 

@@ -12,10 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add support for HTTP/1.0.
 - Add streaming chunked-transfer reader `Http11ReadChunksStream` in `rfc9112::chunk_stream` that yields each decoded chunk as soon as it arrives instead of buffering the whole body.
 - Add W3C Server-Sent Events client: frame parser `SseFrameParser` + `SseFrame` in `sse::frame`, plus std-blocking driver `HttpClientStd::send_streaming` returning a long-lived `SseStream` iterator.
+- Extracted `Http11ReadHeaders` coroutine in `rfc9112::read_headers` so downstream consumers can drive the response-head parse without going through `Http11Send`. `Http11Send`, `Http10Send`, and `HttpClientStd::send_streaming` all delegate to it; previously each duplicated the `httparse` + `Connection` header parse inline.
+- Add unified `HttpCoroutine` trait + two-variant `CoroutineState<Y, R>` (`Yielded` / `Complete`) in `crate::coroutine`, mirroring std's `core::ops::Coroutine` shape. Most coroutines pick the standard `HttpYield { WantsRead, WantsWrite(Vec<u8>) }`; coroutines that need extra intermediate variants declare their own (`HttpSendYield::WantsRedirect`, `Http11ReadChunksStreamYield::Frame`, `SseFrameParserYield::Frame`). `HttpClientStd::run<C>` drives any standard-Yield coroutine generically.
 
 ### Changed
 
 - Organize code into RFC folders.
+- Replaced every per-coroutine `Smtp*Result` / `Http*SendResult` / `Http11ReadChunks*Result` / `WellKnownResult` / `SseFrameParserResult` / `Http11ReadHeadersResult` enum with the generator-shape `CoroutineState<Y, R>`. Each coroutine now implements `HttpCoroutine` directly; `resume` returns `CoroutineState::Yielded(<per-coroutine yield>)` or `CoroutineState::Complete(Result<Output, Error>)`. Per-coroutine `*Ok` payload structs (`Http11ReadChunksOutput`, `Http11ReadHeadersOutput`, `WellKnownOutput`) hold the previous `Ok { … }` fields. Shared `HttpSendOutput` and `HttpSendYield` moved to `rfc9110::send`, reused by both `Http10Send` and `Http11Send`.
 
 ## [0.0.3] - 2025-10-24
 

@@ -21,7 +21,7 @@ use log::trace;
 use memchr::memmem;
 use thiserror::Error;
 
-use crate::rfc9110::chars::CRLF;
+use crate::{coroutine::*, rfc9110::chars::CRLF};
 
 /// Errors that can occur during the coroutine progression.
 #[derive(Debug, Error)]
@@ -30,22 +30,18 @@ pub enum Http11ReadChunksStreamError {
     InvalidChunkSize(String),
 }
 
-/// Result returned by [`Http11ReadChunksStream::resume`].
+/// Per-step yield emitted by [`Http11ReadChunksStream`].
+///
+/// Extends the standard [`HttpYield`] with the [`Self::Frame`] variant
+/// so callers can consume each decoded chunk as soon as its body bytes
+/// are available.
 #[derive(Debug)]
-pub enum Http11ReadChunksStreamResult {
-    /// A complete chunk body has been decoded. The caller should
-    /// consume `body` and call [`Http11ReadChunksStream::resume`]
-    /// again to pull the next chunk.
-    Frame { body: Vec<u8> },
-    /// The zero-length terminator chunk was seen; the stream is over.
-    /// `remaining` carries any bytes already buffered past the
-    /// terminator (e.g. the start of the next pipelined response on
-    /// the same connection).
-    Done { remaining: Vec<u8> },
-    /// The coroutine needs a socket read.
+pub enum Http11ReadChunksStreamYield {
+    /// Driver should read more bytes from the socket.
     WantsRead,
-    /// The coroutine encountered an error.
-    Err(Http11ReadChunksStreamError),
+    /// A complete chunk body has been decoded. The caller should
+    /// consume `body` and resume the coroutine to pull the next chunk.
+    Frame { body: Vec<u8> },
 }
 
 #[derive(Debug, Default)]
@@ -58,6 +54,10 @@ enum State {
 /// I/O-free coroutine to read an HTTP response body using chunked
 /// transfer coding, yielding each decoded chunk as soon as it
 /// arrives.
+///
+/// On `Complete(Ok(remaining))`, `remaining` carries any bytes already
+/// buffered past the zero-length terminator (typically the start of
+/// the next pipelined response on the same connection).
 #[derive(Debug, Default)]
 pub struct Http11ReadChunksStream {
     state: State,
@@ -66,15 +66,11 @@ pub struct Http11ReadChunksStream {
     buf: Vec<u8>,
 }
 
-impl Http11ReadChunksStream {
-    /// Advances the coroutine.
-    ///
-    /// Pass [`None`] when there is no data to provide (initial call
-    /// or re-entry after a frame has been consumed). Pass `Some(data)`
-    /// with bytes read from the socket after a
-    /// [`Http11ReadChunksStreamResult::WantsRead`]. Pass `Some(&[])`
-    /// to signal EOF.
-    pub fn resume(&mut self, arg: Option<&[u8]>) -> Http11ReadChunksStreamResult {
+impl HttpCoroutine for Http11ReadChunksStream {
+    type Yield = Http11ReadChunksStreamYield;
+    type Return = Result<Vec<u8>, Http11ReadChunksStreamError>;
+
+    fn resume(&mut self, arg: Option<&[u8]>) -> HttpCoroutineState<Self::Yield, Self::Return> {
         if let Some(data) = arg {
             trace!("resume with arg: {}", String::from_utf8_lossy(data));
             self.buf.extend_from_slice(data);
@@ -83,12 +79,12 @@ impl Http11ReadChunksStream {
         loop {
             if self.wants_read {
                 self.wants_read = false;
-                return Http11ReadChunksStreamResult::WantsRead;
+                return HttpCoroutineState::Yielded(Http11ReadChunksStreamYield::WantsRead);
             }
 
             if self.done {
                 let remaining = mem::take(&mut self.buf);
-                return Http11ReadChunksStreamResult::Done { remaining };
+                return HttpCoroutineState::Complete(Ok(remaining));
             }
 
             match self.state {
@@ -116,7 +112,7 @@ impl Http11ReadChunksStream {
                     let Ok(n) = usize::from_str_radix(&chunk_size, 16) else {
                         let chunk_size = chunk_size.to_string();
                         let err = Http11ReadChunksStreamError::InvalidChunkSize(chunk_size);
-                        return Http11ReadChunksStreamResult::Err(err);
+                        return HttpCoroutineState::Complete(Err(err));
                     };
 
                     self.buf.drain(..crlf + CRLF.len());
@@ -141,7 +137,9 @@ impl Http11ReadChunksStream {
                     trace!("drained: {}", String::from_utf8_lossy(&body));
                     self.buf.drain(..CRLF.len());
                     self.state = State::ChunkSize;
-                    return Http11ReadChunksStreamResult::Frame { body };
+                    return HttpCoroutineState::Yielded(Http11ReadChunksStreamYield::Frame {
+                        body,
+                    });
                 }
             }
         }
@@ -161,10 +159,14 @@ mod tests {
 
         let remaining = loop {
             match coroutine.resume(arg.take()) {
-                Http11ReadChunksStreamResult::Frame { body } => frames.push(body),
-                Http11ReadChunksStreamResult::Done { remaining } => break remaining,
-                Http11ReadChunksStreamResult::WantsRead => unreachable!("wants read"),
-                Http11ReadChunksStreamResult::Err(err) => unreachable!("{err}"),
+                HttpCoroutineState::Yielded(Http11ReadChunksStreamYield::Frame { body }) => {
+                    frames.push(body);
+                }
+                HttpCoroutineState::Complete(Ok(remaining)) => break remaining,
+                HttpCoroutineState::Yielded(Http11ReadChunksStreamYield::WantsRead) => {
+                    unreachable!("wants read");
+                }
+                HttpCoroutineState::Complete(Err(err)) => unreachable!("{err}"),
             }
         };
 
@@ -202,14 +204,16 @@ mod tests {
         let buf: Option<&[u8]> = Some(b":\r\n0\r\n\r\n");
 
         match coroutine.resume(buf) {
-            Http11ReadChunksStreamResult::Err(Http11ReadChunksStreamError::InvalidChunkSize(s)) => {
+            HttpCoroutineState::Complete(Err(Http11ReadChunksStreamError::InvalidChunkSize(s))) => {
                 assert_eq!(":", s)
             }
-            Http11ReadChunksStreamResult::Frame { body } => {
+            HttpCoroutineState::Yielded(Http11ReadChunksStreamYield::Frame { body }) => {
                 unreachable!("unexpected frame: {body:?}")
             }
-            Http11ReadChunksStreamResult::Done { .. } => unreachable!("done"),
-            Http11ReadChunksStreamResult::WantsRead => unreachable!("wants read"),
+            HttpCoroutineState::Complete(Ok(_)) => unreachable!("done"),
+            HttpCoroutineState::Yielded(Http11ReadChunksStreamYield::WantsRead) => {
+                unreachable!("wants read");
+            }
         }
     }
 
@@ -221,15 +225,17 @@ mod tests {
 
         loop {
             match coroutine.resume(arg.take()) {
-                Http11ReadChunksStreamResult::Frame { body } => frames.push(body),
-                Http11ReadChunksStreamResult::Done { remaining } => {
+                HttpCoroutineState::Yielded(Http11ReadChunksStreamYield::Frame { body }) => {
+                    frames.push(body);
+                }
+                HttpCoroutineState::Complete(Ok(remaining)) => {
                     assert!(remaining.is_empty());
                     break;
                 }
-                Http11ReadChunksStreamResult::WantsRead => {
+                HttpCoroutineState::Yielded(Http11ReadChunksStreamYield::WantsRead) => {
                     arg = Some(b"\nHello\r\n0\r\n\r\n");
                 }
-                Http11ReadChunksStreamResult::Err(err) => unreachable!("{err}"),
+                HttpCoroutineState::Complete(Err(err)) => unreachable!("{err}"),
             }
         }
 
@@ -244,15 +250,17 @@ mod tests {
 
         loop {
             match coroutine.resume(arg.take()) {
-                Http11ReadChunksStreamResult::Frame { body } => frames.push(body),
-                Http11ReadChunksStreamResult::Done { remaining } => {
+                HttpCoroutineState::Yielded(Http11ReadChunksStreamYield::Frame { body }) => {
+                    frames.push(body);
+                }
+                HttpCoroutineState::Complete(Ok(remaining)) => {
                     assert!(remaining.is_empty());
                     break;
                 }
-                Http11ReadChunksStreamResult::WantsRead => {
+                HttpCoroutineState::Yielded(Http11ReadChunksStreamYield::WantsRead) => {
                     arg = Some(b"lo\r\n0\r\n\r\n");
                 }
-                Http11ReadChunksStreamResult::Err(err) => unreachable!("{err}"),
+                HttpCoroutineState::Complete(Err(err)) => unreachable!("{err}"),
             }
         }
 
@@ -267,10 +275,14 @@ mod tests {
 
         let remaining = loop {
             match coroutine.resume(arg.take()) {
-                Http11ReadChunksStreamResult::Frame { body } => frames.push(body),
-                Http11ReadChunksStreamResult::Done { remaining } => break remaining,
-                Http11ReadChunksStreamResult::WantsRead => unreachable!("wants read"),
-                Http11ReadChunksStreamResult::Err(err) => unreachable!("{err}"),
+                HttpCoroutineState::Yielded(Http11ReadChunksStreamYield::Frame { body }) => {
+                    frames.push(body);
+                }
+                HttpCoroutineState::Complete(Ok(remaining)) => break remaining,
+                HttpCoroutineState::Yielded(Http11ReadChunksStreamYield::WantsRead) => {
+                    unreachable!("wants read");
+                }
+                HttpCoroutineState::Complete(Err(err)) => unreachable!("{err}"),
             }
         };
 

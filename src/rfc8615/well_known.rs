@@ -4,16 +4,16 @@
 //! The discovery flow is a single HTTP exchange:
 //!
 //! 1. Client sends `GET /.well-known/{service}` to the origin.
-//! 2. Server responds — surfaced as [`WellKnownResult::Ok`].
-//!    Inspect `redirect_url` to know whether the server redirected
-//!    (the expected case) or responded directly.
+//! 2. Server responds. Inspect `redirect_url` on the
+//!    [`WellKnownOutput`] to know whether the server redirected (the
+//!    expected case) or responded directly.
 //!
-//! Use [`WellKnown::prepare_request`] to build the request, then
-//! drive the coroutine with [`WellKnown::resume`]:
+//! Use [`WellKnown::prepare_request`] to build the request, then drive
+//! the coroutine with [`WellKnown::resume`]:
 //!
 //! ```rust,ignore
 //! use std::{io::{Read, Write}, net::TcpStream};
-//! use io_http::rfc8615::well_known::{WellKnown, WellKnownResult};
+//! use io_http::{coroutine::*, rfc8615::well_known::WellKnown};
 //!
 //! let request = WellKnown::prepare_request("http://example.com", "caldav").unwrap();
 //! let mut stream = TcpStream::connect("example.com:80").unwrap();
@@ -23,33 +23,34 @@
 //!
 //! loop {
 //!     match well_known.resume(arg.take()) {
-//!         WellKnownResult::Ok { redirect_url: Some(url), .. } => {
-//!             println!("caldav endpoint: {url}");
+//!         HttpCoroutineState::Complete(Ok(out)) if out.redirect_url.is_some() => {
+//!             println!("caldav endpoint: {}", out.redirect_url.unwrap());
 //!             break;
 //!         }
-//!         WellKnownResult::Ok { response, .. } => {
-//!             panic!("expected redirect, got {}", *response.status);
+//!         HttpCoroutineState::Complete(Ok(out)) => {
+//!             panic!("expected redirect, got {}", *out.response.status);
 //!         }
-//!         WellKnownResult::Err(err) => panic!("{err}"),
-//!         WellKnownResult::WantsRead => {
+//!         HttpCoroutineState::Complete(Err(err)) => panic!("{err}"),
+//!         HttpCoroutineState::Yielded(HttpYield::WantsRead) => {
 //!             let n = stream.read(&mut buf).unwrap();
 //!             arg = Some(&buf[..n]);
 //!         }
-//!         WellKnownResult::WantsWrite(bytes) => {
+//!         HttpCoroutineState::Yielded(HttpYield::WantsWrite(bytes)) => {
 //!             stream.write_all(&bytes).unwrap();
 //!         }
 //!     }
 //! }
 //! ```
 
-use alloc::{format, string::String, vec::Vec};
+use alloc::{format, string::String};
 
 use thiserror::Error;
 use url::{ParseError, Url};
 
 use crate::{
-    rfc9110::{request::HttpRequest, response::HttpResponse},
-    rfc9112::send::{Http11Send, Http11SendError, Http11SendResult},
+    coroutine::*,
+    rfc9110::{request::HttpRequest, response::HttpResponse, send::HttpSendYield},
+    rfc9112::send::{Http11Send, Http11SendError},
 };
 
 /// Errors that can occur during the coroutine progression.
@@ -61,38 +62,25 @@ pub enum WellKnownError {
     Send(#[from] Http11SendError),
 }
 
-/// Result returned by [`WellKnown::resume`].
+/// Terminal output of [`WellKnown`].
 #[derive(Debug)]
-pub enum WellKnownResult {
-    /// The coroutine has successfully terminated its execution.
-    Ok {
-        /// The response received.
-        response: HttpResponse,
-        /// Whether the server indicated the connection can be reused.
-        keep_alive: bool,
-        /// Whether the response stayed on the same scheme, host, and
-        /// port as the request.
-        ///
-        /// Always `true` for non-redirect responses. When `false` on
-        /// a redirect, forwarding credentials to the new host without
-        /// user consent is inadvisable (RFC 9110 §15.4).
-        same_origin: bool,
-        /// The resolved redirect target URL, if the server responded
-        /// with a 3xx and a parseable `Location` header.
-        ///
-        /// `None` when the server responded directly (non-redirect).
-        redirect_url: Option<Url>,
-    },
-
-    /// The coroutine needs more bytes to be read from the socket.
-    WantsRead,
-
-    /// The coroutine wants the given bytes to be written to the
-    /// socket.
-    WantsWrite(Vec<u8>),
-
-    /// The coroutine encountered an error.
-    Err(WellKnownError),
+pub struct WellKnownOutput {
+    /// The response received.
+    pub response: HttpResponse,
+    /// Whether the server indicated the connection can be reused.
+    pub keep_alive: bool,
+    /// Whether the response stayed on the same scheme, host, and port
+    /// as the request.
+    ///
+    /// Always `true` for non-redirect responses. When `false` on a
+    /// redirect, forwarding credentials to the new host without user
+    /// consent is inadvisable (RFC 9110 §15.4).
+    pub same_origin: bool,
+    /// The resolved redirect target URL, if the server responded with
+    /// a 3xx and a parseable `Location` header.
+    ///
+    /// `None` when the server responded directly (non-redirect).
+    pub redirect_url: Option<Url>,
 }
 
 /// I/O-free coroutine to perform a `.well-known` URI discovery request.
@@ -128,39 +116,40 @@ impl WellKnown {
     pub fn new(request: HttpRequest) -> Self {
         Self(Http11Send::new(request))
     }
+}
 
-    /// Advances the coroutine.
-    ///
-    /// Pass [`None`] when there is no data to provide (initial call,
-    /// after a write). Pass `Some(data)` with bytes read from the
-    /// socket after a [`WellKnownResult::WantsRead`]. Pass `Some(&[])`
-    /// to signal EOF.
-    pub fn resume(&mut self, arg: Option<&[u8]>) -> WellKnownResult {
+impl HttpCoroutine for WellKnown {
+    type Yield = HttpYield;
+    type Return = Result<WellKnownOutput, WellKnownError>;
+
+    fn resume(&mut self, arg: Option<&[u8]>) -> HttpCoroutineState<Self::Yield, Self::Return> {
         match self.0.resume(arg) {
-            Http11SendResult::Ok {
-                response,
-                keep_alive,
-                ..
-            } => WellKnownResult::Ok {
-                response,
-                keep_alive,
-                same_origin: true,
-                redirect_url: None,
-            },
-            Http11SendResult::WantsRead => WellKnownResult::WantsRead,
-            Http11SendResult::WantsWrite(bytes) => WellKnownResult::WantsWrite(bytes),
-            Http11SendResult::WantsRedirect {
+            HttpCoroutineState::Complete(Ok(out)) => {
+                HttpCoroutineState::Complete(Ok(WellKnownOutput {
+                    response: out.response,
+                    keep_alive: out.keep_alive,
+                    same_origin: true,
+                    redirect_url: None,
+                }))
+            }
+            HttpCoroutineState::Yielded(HttpSendYield::WantsRead) => {
+                HttpCoroutineState::Yielded(HttpYield::WantsRead)
+            }
+            HttpCoroutineState::Yielded(HttpSendYield::WantsWrite(bytes)) => {
+                HttpCoroutineState::Yielded(HttpYield::WantsWrite(bytes))
+            }
+            HttpCoroutineState::Yielded(HttpSendYield::WantsRedirect {
                 url,
                 response,
                 keep_alive,
                 same_origin,
-            } => WellKnownResult::Ok {
+            }) => HttpCoroutineState::Complete(Ok(WellKnownOutput {
                 response,
                 keep_alive,
                 same_origin,
                 redirect_url: Some(url),
-            },
-            Http11SendResult::Err(err) => WellKnownResult::Err(err.into()),
+            })),
+            HttpCoroutineState::Complete(Err(err)) => HttpCoroutineState::Complete(Err(err.into())),
         }
     }
 }

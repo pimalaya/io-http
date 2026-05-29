@@ -9,4 +9,5 @@ pub mod chars;
 pub mod headers;
 pub mod request;
 pub mod response;
+pub mod send;
 pub mod status;

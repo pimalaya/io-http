@@ -4,12 +4,15 @@
 //! response buffer. No network connection is made.
 
 use io_http::{
-    rfc1945::send::{Http10Send, Http10SendResult},
-    rfc9110::request::HttpRequest,
+    coroutine::*,
+    rfc1945::send::{Http10Send, Http10SendError},
+    rfc9110::{request::HttpRequest, send::*},
 };
 use url::Url;
 
-fn test(response: &'static [u8]) -> Http10SendResult {
+type Step = HttpCoroutineState<HttpSendYield, Result<HttpSendOutput, Http10SendError>>;
+
+fn test(response: &'static [u8]) -> Step {
     let url = Url::parse("http://example.com/").unwrap();
     let request = HttpRequest::get(url).header("Host", "example.com");
 
@@ -19,14 +22,14 @@ fn test(response: &'static [u8]) -> Http10SendResult {
 
     loop {
         match send.resume(arg.take()) {
-            Http10SendResult::WantsWrite(_) => arg = None,
-            Http10SendResult::WantsRead if !sent => {
+            HttpCoroutineState::Yielded(HttpSendYield::WantsWrite(_)) => arg = None,
+            HttpCoroutineState::Yielded(HttpSendYield::WantsRead) if !sent => {
                 sent = true;
                 arg = Some(response);
             }
             // After the response, signal EOF so a read-to-EOF body
             // strategy can terminate.
-            Http10SendResult::WantsRead => arg = Some(b""),
+            HttpCoroutineState::Yielded(HttpSendYield::WantsRead) => arg = Some(b""),
             any => return any,
         }
     }
@@ -37,7 +40,7 @@ fn http10_200_ok() {
     let response = b"HTTP/1.0 200 OK\r\nContent-Length: 5\r\n\r\nhello";
 
     match test(response) {
-        Http10SendResult::Ok { response, .. } => assert_eq!(*response.status, 200),
+        HttpCoroutineState::Complete(Ok(out)) => assert_eq!(*out.response.status, 200),
         other => panic!("unexpected result: {other:?}"),
     }
 }
@@ -47,7 +50,7 @@ fn http10_version() {
     let response = b"HTTP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n";
 
     match test(response) {
-        Http10SendResult::Ok { response, .. } => assert_eq!(response.version, "HTTP/1.0"),
+        HttpCoroutineState::Complete(Ok(out)) => assert_eq!(out.response.version, "HTTP/1.0"),
         other => panic!("unexpected result: {other:?}"),
     }
 }
@@ -57,7 +60,7 @@ fn body_content_length() {
     let response = b"HTTP/1.0 200 OK\r\nContent-Length: 11\r\n\r\nhello world";
 
     match test(response) {
-        Http10SendResult::Ok { response, .. } => assert_eq!(response.body, b"hello world"),
+        HttpCoroutineState::Complete(Ok(out)) => assert_eq!(out.response.body, b"hello world"),
         other => panic!("unexpected result: {other:?}"),
     }
 }
@@ -67,7 +70,7 @@ fn body_read_to_eof() {
     let response = b"HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\nhello world";
 
     match test(response) {
-        Http10SendResult::Ok { response, .. } => assert_eq!(response.body, b"hello world"),
+        HttpCoroutineState::Complete(Ok(out)) => assert_eq!(out.response.body, b"hello world"),
         other => panic!("unexpected result: {other:?}"),
     }
 }
@@ -77,9 +80,9 @@ fn body_empty_on_204() {
     let response = b"HTTP/1.0 204 No Content\r\n\r\n";
 
     match test(response) {
-        Http10SendResult::Ok { response, .. } => {
-            assert_eq!(*response.status, 204);
-            assert!(response.body.is_empty());
+        HttpCoroutineState::Complete(Ok(out)) => {
+            assert_eq!(*out.response.status, 204);
+            assert!(out.response.body.is_empty());
         }
         other => panic!("unexpected result: {other:?}"),
     }
@@ -90,9 +93,9 @@ fn body_empty_on_304() {
     let response = b"HTTP/1.0 304 Not Modified\r\n\r\n";
 
     match test(response) {
-        Http10SendResult::Ok { response, .. } => {
-            assert_eq!(*response.status, 304);
-            assert!(response.body.is_empty());
+        HttpCoroutineState::Complete(Ok(out)) => {
+            assert_eq!(*out.response.status, 304);
+            assert!(out.response.body.is_empty());
         }
         other => panic!("unexpected result: {other:?}"),
     }
@@ -103,7 +106,7 @@ fn keep_alive_false_by_default() {
     let response = b"HTTP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n";
 
     match test(response) {
-        Http10SendResult::Ok { keep_alive, .. } => assert!(!keep_alive),
+        HttpCoroutineState::Complete(Ok(out)) => assert!(!out.keep_alive),
         other => panic!("unexpected result: {other:?}"),
     }
 }
@@ -113,18 +116,18 @@ fn keep_alive_true_on_connection_keep_alive() {
     let response = b"HTTP/1.0 200 OK\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n";
 
     match test(response) {
-        Http10SendResult::Ok { keep_alive, .. } => assert!(keep_alive),
+        HttpCoroutineState::Complete(Ok(out)) => assert!(out.keep_alive),
         other => panic!("unexpected result: {other:?}"),
     }
 }
 
 #[test]
-fn redirect_301_emits_redirect_result() {
+fn redirect_301_emits_redirect_yield() {
     let response =
         b"HTTP/1.0 301 Moved Permanently\r\nLocation: http://example.com/new\r\nContent-Length: 0\r\n\r\n";
 
     match test(response) {
-        Http10SendResult::WantsRedirect { url, response, .. } => {
+        HttpCoroutineState::Yielded(HttpSendYield::WantsRedirect { url, response, .. }) => {
             assert_eq!(url.as_str(), "http://example.com/new");
             assert_eq!(*response.status, 301);
         }
@@ -138,7 +141,9 @@ fn redirect_same_origin() {
         b"HTTP/1.0 302 Found\r\nLocation: http://example.com/other\r\nContent-Length: 0\r\n\r\n";
 
     match test(response) {
-        Http10SendResult::WantsRedirect { same_origin, .. } => assert!(same_origin),
+        HttpCoroutineState::Yielded(HttpSendYield::WantsRedirect { same_origin, .. }) => {
+            assert!(same_origin);
+        }
         other => panic!("unexpected result: {other:?}"),
     }
 }
@@ -149,7 +154,9 @@ fn redirect_cross_origin_different_host() {
         b"HTTP/1.0 302 Found\r\nLocation: http://other.com/\r\nContent-Length: 0\r\n\r\n";
 
     match test(response) {
-        Http10SendResult::WantsRedirect { same_origin, .. } => assert!(!same_origin),
+        HttpCoroutineState::Yielded(HttpSendYield::WantsRedirect { same_origin, .. }) => {
+            assert!(!same_origin);
+        }
         other => panic!("unexpected result: {other:?}"),
     }
 }
@@ -159,7 +166,7 @@ fn redirect_without_location_falls_through_to_ok() {
     let response = b"HTTP/1.0 301 Moved Permanently\r\nContent-Length: 0\r\n\r\n";
 
     match test(response) {
-        Http10SendResult::Ok { response, .. } => assert_eq!(*response.status, 301),
+        HttpCoroutineState::Complete(Ok(out)) => assert_eq!(*out.response.status, 301),
         other => panic!("unexpected result: {other:?}"),
     }
 }
@@ -169,7 +176,7 @@ fn err_on_malformed_headers() {
     let response = b"NOT HTTP AT ALL\r\n\r\n";
 
     match test(response) {
-        Http10SendResult::Err(_) => {}
+        HttpCoroutineState::Complete(Err(_)) => {}
         other => panic!("expected Err, got: {other:?}"),
     }
 }

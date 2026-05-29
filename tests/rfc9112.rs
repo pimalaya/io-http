@@ -4,15 +4,18 @@
 //! response buffer. No network connection is made.
 
 use io_http::{
-    rfc9110::request::HttpRequest,
+    coroutine::*,
+    rfc9110::{request::HttpRequest, send::*},
     rfc9112::{
-        chunk::{Http11ReadChunks, Http11ReadChunksResult},
-        send::{Http11Send, Http11SendResult},
+        chunk::Http11ReadChunks,
+        send::{Http11Send, Http11SendError},
     },
 };
 use url::Url;
 
-fn test(response: &'static [u8]) -> Http11SendResult {
+type Step = HttpCoroutineState<HttpSendYield, Result<HttpSendOutput, Http11SendError>>;
+
+fn test(response: &'static [u8]) -> Step {
     let url = Url::parse("http://example.com/").unwrap();
     let request = HttpRequest::get(url).header("Host", "example.com");
 
@@ -21,8 +24,8 @@ fn test(response: &'static [u8]) -> Http11SendResult {
 
     loop {
         match send.resume(arg.take()) {
-            Http11SendResult::WantsWrite(_) => arg = None,
-            Http11SendResult::WantsRead => arg = Some(response),
+            HttpCoroutineState::Yielded(HttpSendYield::WantsWrite(_)) => arg = None,
+            HttpCoroutineState::Yielded(HttpSendYield::WantsRead) => arg = Some(response),
             any => return any,
         }
     }
@@ -33,13 +36,9 @@ fn http10_response_version_and_connection() {
     let response = b"HTTP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n";
 
     match test(response) {
-        Http11SendResult::Ok {
-            response,
-            keep_alive,
-            ..
-        } => {
-            assert_eq!(response.version, "HTTP/1.0");
-            assert!(!keep_alive);
+        HttpCoroutineState::Complete(Ok(out)) => {
+            assert_eq!(out.response.version, "HTTP/1.0");
+            assert!(!out.keep_alive);
         }
         other => panic!("unexpected result: {other:?}"),
     }
@@ -50,7 +49,7 @@ fn body_content_length() {
     let response = b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nhello world";
 
     match test(response) {
-        Http11SendResult::Ok { response, .. } => assert_eq!(response.body, b"hello world"),
+        HttpCoroutineState::Complete(Ok(out)) => assert_eq!(out.response.body, b"hello world"),
         other => panic!("unexpected result: {other:?}"),
     }
 }
@@ -61,7 +60,7 @@ fn body_chunked() {
         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
 
     match test(response) {
-        Http11SendResult::Ok { response, .. } => assert_eq!(response.body, b"hello world"),
+        HttpCoroutineState::Complete(Ok(out)) => assert_eq!(out.response.body, b"hello world"),
         other => panic!("unexpected result: {other:?}"),
     }
 }
@@ -80,18 +79,18 @@ fn body_read_to_eof() {
 
     let result = loop {
         match send.resume(arg.take()) {
-            Http11SendResult::WantsWrite(_) => arg = None,
-            Http11SendResult::WantsRead if !sent => {
+            HttpCoroutineState::Yielded(HttpSendYield::WantsWrite(_)) => arg = None,
+            HttpCoroutineState::Yielded(HttpSendYield::WantsRead) if !sent => {
                 sent = true;
                 arg = Some(response);
             }
-            Http11SendResult::WantsRead => arg = Some(b""),
+            HttpCoroutineState::Yielded(HttpSendYield::WantsRead) => arg = Some(b""),
             any => break any,
         }
     };
 
     match result {
-        Http11SendResult::Ok { response, .. } => assert_eq!(response.body, b"hello world"),
+        HttpCoroutineState::Complete(Ok(out)) => assert_eq!(out.response.body, b"hello world"),
         other => panic!("unexpected result: {other:?}"),
     }
 }
@@ -101,9 +100,9 @@ fn body_empty_on_204() {
     let response = b"HTTP/1.1 204 No Content\r\n\r\n";
 
     match test(response) {
-        Http11SendResult::Ok { response, .. } => {
-            assert_eq!(*response.status, 204);
-            assert!(response.body.is_empty());
+        HttpCoroutineState::Complete(Ok(out)) => {
+            assert_eq!(*out.response.status, 204);
+            assert!(out.response.body.is_empty());
         }
         other => panic!("unexpected result: {other:?}"),
     }
@@ -114,9 +113,9 @@ fn body_empty_on_304() {
     let response = b"HTTP/1.1 304 Not Modified\r\n\r\n";
 
     match test(response) {
-        Http11SendResult::Ok { response, .. } => {
-            assert_eq!(*response.status, 304);
-            assert!(response.body.is_empty());
+        HttpCoroutineState::Complete(Ok(out)) => {
+            assert_eq!(*out.response.status, 304);
+            assert!(out.response.body.is_empty());
         }
         other => panic!("unexpected result: {other:?}"),
     }
@@ -136,19 +135,19 @@ fn body_chunked_ignored_on_http10_response() {
 
     let result = loop {
         match send.resume(arg.take()) {
-            Http11SendResult::WantsWrite(_) => arg = None,
-            Http11SendResult::WantsRead if !sent => {
+            HttpCoroutineState::Yielded(HttpSendYield::WantsWrite(_)) => arg = None,
+            HttpCoroutineState::Yielded(HttpSendYield::WantsRead) if !sent => {
                 sent = true;
                 arg = Some(response);
             }
-            Http11SendResult::WantsRead => arg = Some(b""),
+            HttpCoroutineState::Yielded(HttpSendYield::WantsRead) => arg = Some(b""),
             any => break any,
         }
     };
 
     match result {
         // Body must be the raw wire bytes, not the decoded chunk payload.
-        Http11SendResult::Ok { response, .. } => assert_ne!(response.body, b"hello"),
+        HttpCoroutineState::Complete(Ok(out)) => assert_ne!(out.response.body, b"hello"),
         other => panic!("unexpected result: {other:?}"),
     }
 }
@@ -158,7 +157,7 @@ fn keep_alive_true_by_default_on_http11() {
     let response = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
 
     match test(response) {
-        Http11SendResult::Ok { keep_alive, .. } => assert!(keep_alive),
+        HttpCoroutineState::Complete(Ok(out)) => assert!(out.keep_alive),
         other => panic!("unexpected result: {other:?}"),
     }
 }
@@ -168,7 +167,7 @@ fn keep_alive_false_on_connection_close() {
     let response = b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
 
     match test(response) {
-        Http11SendResult::Ok { keep_alive, .. } => assert!(!keep_alive),
+        HttpCoroutineState::Complete(Ok(out)) => assert!(!out.keep_alive),
         other => panic!("unexpected result: {other:?}"),
     }
 }
@@ -176,12 +175,12 @@ fn keep_alive_false_on_connection_close() {
 // ── Redirects ─────────────────────────────────────────────────────────────────
 
 #[test]
-fn redirect_301_emits_redirect_result() {
+fn redirect_301_emits_redirect_yield() {
     let response =
         b"HTTP/1.1 301 Moved Permanently\r\nLocation: http://example.com/new\r\nContent-Length: 0\r\n\r\n";
 
     match test(response) {
-        Http11SendResult::WantsRedirect { url, response, .. } => {
+        HttpCoroutineState::Yielded(HttpSendYield::WantsRedirect { url, response, .. }) => {
             assert_eq!(url.as_str(), "http://example.com/new");
             assert_eq!(*response.status, 301);
         }
@@ -195,7 +194,9 @@ fn redirect_same_origin() {
         b"HTTP/1.1 302 Found\r\nLocation: http://example.com/other\r\nContent-Length: 0\r\n\r\n";
 
     match test(response) {
-        Http11SendResult::WantsRedirect { same_origin, .. } => assert!(same_origin),
+        HttpCoroutineState::Yielded(HttpSendYield::WantsRedirect { same_origin, .. }) => {
+            assert!(same_origin);
+        }
         other => panic!("unexpected result: {other:?}"),
     }
 }
@@ -206,7 +207,9 @@ fn redirect_cross_origin_different_host() {
         b"HTTP/1.1 302 Found\r\nLocation: http://other.com/\r\nContent-Length: 0\r\n\r\n";
 
     match test(response) {
-        Http11SendResult::WantsRedirect { same_origin, .. } => assert!(!same_origin),
+        HttpCoroutineState::Yielded(HttpSendYield::WantsRedirect { same_origin, .. }) => {
+            assert!(!same_origin);
+        }
         other => panic!("unexpected result: {other:?}"),
     }
 }
@@ -217,7 +220,9 @@ fn redirect_cross_origin_different_scheme() {
         b"HTTP/1.1 302 Found\r\nLocation: https://example.com/\r\nContent-Length: 0\r\n\r\n";
 
     match test(response) {
-        Http11SendResult::WantsRedirect { same_origin, .. } => assert!(!same_origin),
+        HttpCoroutineState::Yielded(HttpSendYield::WantsRedirect { same_origin, .. }) => {
+            assert!(!same_origin);
+        }
         other => panic!("unexpected result: {other:?}"),
     }
 }
@@ -227,7 +232,7 @@ fn redirect_without_location_falls_through_to_ok() {
     let response = b"HTTP/1.1 301 Moved Permanently\r\nContent-Length: 0\r\n\r\n";
 
     match test(response) {
-        Http11SendResult::Ok { response, .. } => assert_eq!(*response.status, 301),
+        HttpCoroutineState::Complete(Ok(out)) => assert_eq!(*out.response.status, 301),
         other => panic!("unexpected result: {other:?}"),
     }
 }
@@ -237,7 +242,7 @@ fn err_on_malformed_headers() {
     let response = b"NOT HTTP AT ALL\r\n\r\n";
 
     match test(response) {
-        Http11SendResult::Err(_) => {}
+        HttpCoroutineState::Complete(Err(_)) => {}
         other => panic!("expected Err, got: {other:?}"),
     }
 }
@@ -246,9 +251,10 @@ fn test_chunks(encoded: &[u8]) -> Vec<u8> {
     let mut chunks = Http11ReadChunks::default();
 
     match chunks.resume(Some(encoded)) {
-        Http11ReadChunksResult::Ok { body, .. } => body,
-        Http11ReadChunksResult::WantsRead => panic!("unexpected WantsRead"),
-        Http11ReadChunksResult::Err(err) => panic!("unexpected error: {err}"),
+        HttpCoroutineState::Complete(Ok(out)) => out.body,
+        HttpCoroutineState::Yielded(HttpYield::WantsRead) => panic!("unexpected WantsRead"),
+        HttpCoroutineState::Yielded(HttpYield::WantsWrite(_)) => panic!("unexpected WantsWrite"),
+        HttpCoroutineState::Complete(Err(err)) => panic!("unexpected error: {err}"),
     }
 }
 

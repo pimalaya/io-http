@@ -17,8 +17,9 @@ use std::{
 };
 
 use io_http::{
-    rfc1945::send::{Http10Send, Http10SendResult},
-    rfc9110::request::HttpRequest,
+    coroutine::*,
+    rfc1945::send::Http10Send,
+    rfc9110::{request::HttpRequest, send::HttpSendYield},
 };
 use log::info;
 use url::Url;
@@ -47,16 +48,18 @@ fn main() {
 
         loop {
             match send.resume(arg.take()) {
-                Http10SendResult::Ok { response, .. } => break 'outer response,
-                Http10SendResult::Err(err) => panic!("{err}"),
-                Http10SendResult::WantsWrite(bytes) => {
+                HttpCoroutineState::Complete(Ok(out)) => break 'outer out.response,
+                HttpCoroutineState::Complete(Err(err)) => panic!("{err}"),
+                HttpCoroutineState::Yielded(HttpSendYield::WantsWrite(bytes)) => {
                     stream.write_all(&bytes).unwrap();
                 }
-                Http10SendResult::WantsRead => {
+                HttpCoroutineState::Yielded(HttpSendYield::WantsRead) => {
                     let n = stream.read(&mut buf).unwrap();
                     arg = Some(&buf[..n]);
                 }
-                Http10SendResult::WantsRedirect { url: new_url, .. } => {
+                HttpCoroutineState::Yielded(HttpSendYield::WantsRedirect {
+                    url: new_url, ..
+                }) => {
                     info!("redirection requested");
                     url = new_url;
                     break;

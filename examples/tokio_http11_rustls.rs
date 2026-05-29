@@ -13,8 +13,9 @@
 use std::{env, sync::Arc};
 
 use io_http::{
-    rfc9110::request::HttpRequest,
-    rfc9112::send::{Http11Send, Http11SendResult},
+    coroutine::*,
+    rfc9110::{request::HttpRequest, send::HttpSendYield},
+    rfc9112::send::Http11Send,
 };
 use log::info;
 use rustls::ClientConfig;
@@ -58,16 +59,18 @@ async fn main() {
 
         loop {
             match send.resume(arg.take()) {
-                Http11SendResult::Ok { response, .. } => break 'outer response,
-                Http11SendResult::Err(err) => panic!("{err}"),
-                Http11SendResult::WantsWrite(bytes) => {
+                HttpCoroutineState::Complete(Ok(out)) => break 'outer out.response,
+                HttpCoroutineState::Complete(Err(err)) => panic!("{err}"),
+                HttpCoroutineState::Yielded(HttpSendYield::WantsWrite(bytes)) => {
                     stream.write_all(&bytes).await.unwrap();
                 }
-                Http11SendResult::WantsRead => {
+                HttpCoroutineState::Yielded(HttpSendYield::WantsRead) => {
                     let n = stream.read(&mut buf).await.unwrap();
                     arg = Some(&buf[..n]);
                 }
-                Http11SendResult::WantsRedirect { url: new_url, .. } => {
+                HttpCoroutineState::Yielded(HttpSendYield::WantsRedirect {
+                    url: new_url, ..
+                }) => {
                     info!("redirection requested");
                     url = new_url;
                     break;

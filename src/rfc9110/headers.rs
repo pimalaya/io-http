@@ -1,8 +1,8 @@
 //! Common HTTP header name constants (RFC 9110 §5), lowercase for
 //! case-insensitive comparison.
 
-/// Header names whose values are redacted in [`fmt::Debug`] output to
-/// prevent accidental credential leakage in logs.
+/// Header names whose values are redacted in [`core::fmt::Debug`]
+/// output to prevent accidental credential leakage in logs.
 pub const SENSITIVE_HEADERS: &[&str] = &[
     AUTHORIZATION,
     PROXY_AUTHORIZATION,
