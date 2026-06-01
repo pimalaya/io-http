@@ -22,7 +22,8 @@
     feature = "native-tls"
 ))]
 use alloc::string::{String, ToString};
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, vec, vec::Vec};
+
 use std::io::{self, Read, Write};
 
 #[cfg(any(
@@ -48,6 +49,14 @@ use crate::{
 };
 
 const READ_BUFFER_SIZE: usize = 16 * 1024;
+
+/// Default ALPN protocol identifier offered during the TLS handshake
+/// for HTTPS connections (RFC 7301 + IANA registry: `http/1.1`).
+/// Re-exported so config-driven callers can use it as a serde default
+/// and so wizard/discovery code shares a single source of truth.
+pub fn default_alpn() -> Vec<String> {
+    vec![String::from("http/1.1")]
+}
 
 /// Errors returned by [`HttpClientStd`].
 #[derive(Debug, Error)]
@@ -107,8 +116,9 @@ impl HttpClientStd {
     }
 
     /// Connects to `url` and runs the TLS handshake when the scheme
-    /// is `https`. `http` URLs go through plain TCP. ALPN is set to
-    /// `http/1.1`.
+    /// is `https`. `http` URLs go through plain TCP. ALPN is read
+    /// from `tls.rustls.alpn` (see [`default_alpn`] for the
+    /// HTTP/1.1-conformant `["http/1.1"]`); an empty vec skips ALPN.
     #[cfg(any(
         feature = "rustls-aws",
         feature = "rustls-ring",
