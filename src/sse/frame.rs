@@ -1,15 +1,6 @@
 //! I/O-free coroutine decoding a W3C [Server-Sent Events] stream.
-//!
-//! Bytes are appended via [`SseFrameParser::resume`]; each call returns
-//! the next dispatched event as a [`SseFrameParserYield::Frame`], or
-//! [`SseFrameParserYield::WantsBytes`] when more input is needed. The
-//! parser is driven by a streaming body coroutine (typically
-//! [`crate::rfc9112::chunk_stream::Http11ReadChunksStream`]); the caller
-//! forwards each decoded chunk in and pumps until it asks for more.
-//!
-//! The parser never reaches a terminal state; its `Return` is
-//! [`Infallible`]. The outer driver stops resuming when the underlying
-//! body stream closes.
+//! Line-oriented and infallible: the parser never terminates and the
+//! outer driver stops when the body stream closes.
 //!
 //! [Server-Sent Events]: https://html.spec.whatwg.org/multipage/server-sent-events.html
 
@@ -24,15 +15,8 @@ use log::trace;
 
 use crate::coroutine::*;
 
-/// One dispatched Server-Sent Event.
-///
-/// `event` is the event type set by the most recent `event:` field,
-/// or [`None`] when the field was absent (the spec's default is
-/// "message"; we surface [`None`] so callers can distinguish "default"
-/// from an explicit "message"). `data` is the accumulated `data:`
-/// field values joined by newlines, with the trailing newline
-/// stripped. `id` is the current last-event-id at dispatch time.
-/// `retry` is the most recent `retry:` value seen, if any.
+/// One dispatched Server-Sent Event. `event` is `None` when the
+/// `event:` field was absent; `data` has the trailing newline stripped.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SseFrame {
     pub event: Option<String>,
@@ -42,23 +26,13 @@ pub struct SseFrame {
 }
 
 /// Per-step yield emitted by [`SseFrameParser`].
-///
-/// The parser is line-oriented and infallible: bad fields are silently
-/// ignored per spec, so no `Err` arm is ever produced.
 #[derive(Debug)]
 pub enum SseFrameParserYield {
-    /// A complete event was dispatched.
     Frame(SseFrame),
-    /// The parser needs more bytes from the body stream.
     WantsBytes,
 }
 
 /// I/O-free Server-Sent Events frame parser.
-///
-/// The parser is line-oriented and tolerant: unknown fields are
-/// ignored, comment lines (those starting with `:`) are ignored,
-/// non-integer `retry:` values are ignored, and a NUL character in
-/// `id:` suppresses the id update per spec.
 #[derive(Debug, Default)]
 pub struct SseFrameParser {
     buf: Vec<u8>,
@@ -70,10 +44,8 @@ pub struct SseFrameParser {
 }
 
 impl SseFrameParser {
-    /// Returns the current last-event-id, set by the most recent `id:`
-    /// field. Persists across dispatched frames and is preserved here
-    /// so a reconnecting caller can supply it via the
-    /// `Last-Event-ID` request header.
+    /// Last-event-id seen so far; persists across dispatched frames so a
+    /// reconnecting caller can resume via the `Last-Event-ID` header.
     pub fn last_event_id(&self) -> Option<&str> {
         self.last_event_id.as_deref()
     }
@@ -81,8 +53,6 @@ impl SseFrameParser {
 
 impl HttpCoroutine for SseFrameParser {
     type Yield = SseFrameParserYield;
-    /// The parser never completes; the outer driver stops resuming
-    /// when the underlying body stream is done.
     type Return = Infallible;
 
     fn resume(&mut self, arg: Option<&[u8]>) -> HttpCoroutineState<Self::Yield, Self::Return> {
@@ -160,14 +130,9 @@ impl HttpCoroutine for SseFrameParser {
     }
 }
 
-/// Returns `Some((line_end, consumed))` where `line_end` is the
-/// number of bytes belonging to the line (excluding terminator) and
-/// `consumed` is the total bytes to drain (including terminator), or
-/// [`None`] when the buffer doesn't yet contain a complete line.
-///
-/// Line terminators per spec: `\r\n`, `\n`, or bare `\r`. A trailing
-/// bare `\r` at end-of-buffer is treated as incomplete in case the
-/// next byte is `\n`.
+// Returns (line_end_excl_terminator, total_consumed) or None when the
+// buffer doesn't yet contain a complete line. Terminator may be \r\n,
+// \n, or bare \r; a trailing \r is treated as incomplete pending \n.
 fn next_line(buf: &[u8]) -> Option<(usize, usize)> {
     let cr = memchr::memchr(b'\r', buf);
     let lf = memchr::memchr(b'\n', buf);
@@ -193,8 +158,8 @@ fn next_line(buf: &[u8]) -> Option<(usize, usize)> {
     }
 }
 
-/// Splits a non-empty SSE line on the first `:`. Per spec, the field
-/// value has a single leading SPACE stripped if present.
+// Splits a non-empty SSE line on the first `:`; a single leading SP in
+// the value is stripped per spec.
 fn split_field(line: &[u8]) -> (&[u8], &[u8]) {
     match memchr::memchr(b':', line) {
         None => (line, &[]),

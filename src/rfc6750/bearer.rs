@@ -1,6 +1,19 @@
 //! OAuth 2.0 Bearer token usage: tokens are transmitted as-is in the
 //! `Authorization` request header ([RFC 6750 §2.1]).
 //!
+//! # Example
+//!
+//! ```rust
+//! use io_http::rfc6750::bearer::BearerToken;
+//! use secrecy::ExposeSecret;
+//!
+//! let token = BearerToken::new("mF_9.B5f-4.1JqM");
+//! assert_eq!(token.to_authorization(), "Bearer mF_9.B5f-4.1JqM");
+//!
+//! let parsed = BearerToken::from_authorization("Bearer mF_9.B5f-4.1JqM").unwrap();
+//! assert_eq!(parsed.expose_secret(), "mF_9.B5f-4.1JqM");
+//! ```
+//!
 //! [RFC 6750 §2.1]: https://www.rfc-editor.org/rfc/rfc6750#section-2.1
 
 use core::fmt;
@@ -17,42 +30,22 @@ pub enum BearerError {
     MissingPrefix,
 }
 
-/// An OAuth 2.0 Bearer token.
-///
-/// The token value is stored as a [`SecretString`]: it is redacted in
-/// [`fmt::Debug`] output and zeroed in memory on drop.  Use
-/// [`ExposeSecret::expose_secret`] to access the raw token string.
-///
-/// # Example
-///
-/// ```rust
-/// use io_http::rfc6750::bearer::BearerToken;
-/// use secrecy::ExposeSecret;
-///
-/// let token = BearerToken::new("mF_9.B5f-4.1JqM");
-/// assert_eq!(token.to_authorization(), "Bearer mF_9.B5f-4.1JqM");
-///
-/// let parsed = BearerToken::from_authorization("Bearer mF_9.B5f-4.1JqM").unwrap();
-/// assert_eq!(parsed.expose_secret(), "mF_9.B5f-4.1JqM");
-/// ```
+/// OAuth 2.0 Bearer token; redacted in [`fmt::Debug`], zeroed on drop.
 #[derive(Clone)]
 pub struct BearerToken(SecretString);
 
 impl BearerToken {
-    /// Creates a new bearer token.
+    /// Wraps a token string.
     pub fn new(token: impl Into<String>) -> Self {
         Self(SecretString::from(token.into()))
     }
 
-    /// Returns the `Authorization` header value: `Bearer <token>`.
+    /// Returns the `Bearer <token>` header value.
     pub fn to_authorization(&self) -> String {
         format!("Bearer {}", self.0.expose_secret())
     }
 
-    /// Parses an `Authorization` header value of the form `Bearer
-    /// <token>`.
-    ///
-    /// Returns an error if the `Bearer ` prefix is absent.
+    /// Parses a `Bearer <token>` header value.
     pub fn from_authorization(value: &str) -> Result<Self, BearerError> {
         value
             .strip_prefix("Bearer ")

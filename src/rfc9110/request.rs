@@ -16,18 +16,14 @@ use crate::rfc9110::headers::SENSITIVE_HEADERS;
 /// An outgoing HTTP request.
 #[derive(Clone)]
 pub struct HttpRequest {
-    /// HTTP method (e.g. `"GET"`, `"POST"`).
     pub method: String,
-    /// Request target URL.
     pub url: Url,
-    /// Request headers as `(name, value)` pairs.
     pub headers: Vec<(String, String)>,
-    /// Request body bytes.
     pub body: Vec<u8>,
 }
 
 impl HttpRequest {
-    /// Creates a new GET request to the given URL with no headers or body.
+    /// Builds a new GET request to the given URL.
     pub fn get(url: Url) -> Self {
         Self {
             method: "GET".into(),

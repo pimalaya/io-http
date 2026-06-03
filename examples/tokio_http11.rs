@@ -7,7 +7,7 @@
 //! # Usage
 //!
 //! ```sh
-//! URL=https://example.com/ cargo run --example tokio_http11_rustls
+//! URL=https://example.com/ cargo run --example tokio_http11
 //! ```
 
 use std::{env, sync::Arc};

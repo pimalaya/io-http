@@ -1,10 +1,6 @@
-//! I/O-free coroutine decoding a `Transfer-Encoding: chunked` response
-//! body ([RFC 9112 §7.1]) into a single buffer.
-//!
-//! Driven automatically by [`super::send::Http11Send`] when the response
-//! carries `Transfer-Encoding: chunked`. For long-lived responses where
-//! the caller wants to consume chunks as they arrive (e.g. SSE), use
-//! [`super::chunk_stream::Http11ReadChunksStream`] instead.
+//! I/O-free coroutine decoding a `Transfer-Encoding: chunked` body
+//! ([RFC 9112 §7.1]) into a single buffer. For incremental consumption
+//! use [`super::chunk_stream::Http11ReadChunksStream`].
 //!
 //! [RFC 9112 §7.1]: https://www.rfc-editor.org/rfc/rfc9112#section-7.1
 
@@ -31,10 +27,7 @@ pub enum Http11ReadChunksError {
 /// Terminal output of [`Http11ReadChunks`].
 #[derive(Debug)]
 pub struct Http11ReadChunksOutput {
-    /// The decoded body bytes (concatenation of every chunk's data).
     pub body: Vec<u8>,
-    /// Bytes pre-read past the chunked-stream terminator; the caller
-    /// should feed these to the next coroutine on the same connection.
     pub remaining: Vec<u8>,
 }
 

@@ -1,17 +1,6 @@
-//! I/O-free coroutine to read and parse an HTTP/1.X response head
-//! ([RFC 9112 §6]).
-//!
-//! Accumulates bytes until the `\r\n\r\n` head terminator, parses the
-//! status line + headers via `httparse`, and emits an [`HttpResponse`]
-//! with an empty body. Pre-read body bytes are returned in `remaining`
-//! so the caller can hand them off to a body-decoding coroutine
-//! (chunked, content-length, read-to-EOF, SSE...). `keep_alive`
-//! defaults by version when `Connection` is absent (HTTP/1.0 → `false`,
-//! HTTP/1.1 → `true`).
-//!
-//! Composed by [`super::send::Http11Send`] /
-//! [`crate::rfc1945::send::Http10Send`] and reused by the SSE bootstrap
-//! in [`crate::client::HttpClientStd::send_streaming`].
+//! I/O-free coroutine reading and parsing an HTTP/1.X response head
+//! ([RFC 9112 §6]). Composed by `Http10Send`, `Http11Send`, and the SSE
+//! bootstrap.
 //!
 //! [RFC 9112 §6]: https://www.rfc-editor.org/rfc/rfc9112#section-6
 
@@ -41,16 +30,11 @@ pub enum Http11ReadHeadersError {
     ParseResponseHeaders(HttparseError),
 }
 
-/// Terminal output of [`Http11ReadHeaders`].
+/// Terminal output of [`Http11ReadHeaders`]; `response.body` is empty.
 #[derive(Debug)]
 pub struct Http11ReadHeadersOutput {
-    /// Parsed status line + headers; `body` is empty.
     pub response: HttpResponse,
-    /// Bytes pre-read past the head terminator. Feed these to the
-    /// next coroutine in the pipeline (or finalize an SSE stream
-    /// using them as the initial buffered chunk).
     pub remaining: Vec<u8>,
-    /// Whether the server indicated the connection can be reused.
     pub keep_alive: bool,
 }
 

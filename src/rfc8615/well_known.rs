@@ -1,10 +1,6 @@
-//! I/O-free coroutine performing a `.well-known` URI discovery request
-//! ([RFC 8615]).
-//!
-//! Wraps [`Http11Send`] and surfaces the resolved redirect URL (when
-//! the server returned a 3xx with a parseable `Location`) as part of
-//! the terminal output. Use [`WellKnown::prepare_request`] to build a
-//! correctly-shaped GET on `/.well-known/{service}`.
+//! I/O-free coroutine for `.well-known` URI discovery ([RFC 8615]).
+//! Wraps [`Http11Send`] and surfaces the resolved redirect URL as part
+//! of the terminal output.
 //!
 //! [RFC 8615]: https://www.rfc-editor.org/rfc/rfc8615
 
@@ -28,24 +24,14 @@ pub enum WellKnownError {
     Send(#[from] Http11SendError),
 }
 
-/// Terminal output of [`WellKnown`].
+/// Terminal output of [`WellKnown`]; `redirect_url` is `Some` only on
+/// 3xx with a parseable `Location`. `same_origin` is `false` when a
+/// redirect crosses scheme/host/port (do not forward credentials).
 #[derive(Debug)]
 pub struct WellKnownOutput {
-    /// The response received.
     pub response: HttpResponse,
-    /// Whether the server indicated the connection can be reused.
     pub keep_alive: bool,
-    /// Whether the response stayed on the same scheme, host, and port
-    /// as the request.
-    ///
-    /// Always `true` for non-redirect responses. When `false` on a
-    /// redirect, forwarding credentials to the new host without user
-    /// consent is inadvisable (RFC 9110 §15.4).
     pub same_origin: bool,
-    /// The resolved redirect target URL, if the server responded with
-    /// a 3xx and a parseable `Location` header.
-    ///
-    /// `None` when the server responded directly (non-redirect).
     pub redirect_url: Option<Url>,
 }
 
@@ -54,16 +40,8 @@ pub struct WellKnownOutput {
 pub struct WellKnown(Http11Send);
 
 impl WellKnown {
-    /// Builds a GET request for `/.well-known/{service}` on the given
-    /// base URL.
-    ///
-    /// The base URL's scheme, host, and port are preserved; only the
-    /// path is replaced with `/.well-known/{service}`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`WellKnownError::InvalidBaseUrl`] if `base_url` cannot
-    /// be parsed as an absolute URL.
+    /// Builds a GET on `/.well-known/{service}` against `base_url`; the
+    /// base scheme, host, and port are preserved.
     pub fn prepare_request(
         base_url: impl AsRef<str>,
         service: impl AsRef<str>,
@@ -75,10 +53,7 @@ impl WellKnown {
         Ok(HttpRequest::get(url))
     }
 
-    /// Creates a new coroutine from the given request.
-    ///
-    /// Use [`WellKnown::prepare_request`] to build a correctly-formed
-    /// request, or supply a custom [`HttpRequest`] directly.
+    /// Creates a new coroutine from a prepared request.
     pub fn new(request: HttpRequest) -> Self {
         Self(Http11Send::new(request))
     }

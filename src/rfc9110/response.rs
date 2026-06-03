@@ -8,22 +8,17 @@ use alloc::{borrow::ToOwned, format, string::String, vec::Vec};
 
 use crate::rfc9110::{headers::SENSITIVE_HEADERS, status::StatusCode};
 
-/// An incoming HTTP response.
+/// An incoming HTTP response. Header names are stored lowercase.
 #[derive(Clone)]
 pub struct HttpResponse {
-    /// HTTP status code.
     pub status: StatusCode,
-    /// HTTP protocol version string (e.g. `"HTTP/1.1"`, `"HTTP/1.0"`).
     pub version: String,
-    /// Response headers as `(name, value)` pairs (names stored in lowercase).
     pub headers: Vec<(String, String)>,
-    /// Response body bytes.
     pub body: Vec<u8>,
 }
 
 impl HttpResponse {
-    /// Returns the value of the first header with the given name
-    /// (case-insensitive), if any.
+    /// Returns the first header matching `name` (case-insensitive).
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
@@ -59,8 +54,7 @@ impl fmt::Debug for HttpResponse {
     }
 }
 
-/// Incremental builder for [`HttpResponse`], used internally by
-/// wire-format send coroutines.
+/// Incremental builder for [`HttpResponse`].
 #[derive(Clone, Debug)]
 pub(crate) struct ResponseBuilder {
     pub(crate) status: Option<StatusCode>,
@@ -79,14 +73,11 @@ impl Default for ResponseBuilder {
 }
 
 impl ResponseBuilder {
-    /// Adds a header (name stored in lowercase).
     pub(crate) fn header(&mut self, name: &str, value: &[u8]) {
         let value = String::from_utf8_lossy(value).into_owned();
         self.headers.push((name.to_lowercase(), value));
     }
 
-    /// Returns the value of the first header with the given name
-    /// (case-insensitive), if any.
     pub(crate) fn get_header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
@@ -94,7 +85,6 @@ impl ResponseBuilder {
             .map(|(_, v)| v.as_str())
     }
 
-    /// Finalizes the builder into an [`HttpResponse`].
     pub(crate) fn build(self, body: Vec<u8>) -> HttpResponse {
         HttpResponse {
             status: self.status.unwrap_or(StatusCode(200)),

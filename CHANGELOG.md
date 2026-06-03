@@ -76,7 +76,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Organised source into RFC-numbered folders (`rfc1945/`, `rfc6750/`, `rfc7617/`, `rfc8615/`, `rfc9110/`, `rfc9112/`).
+
 - Normalised error messages to the uniform `"<protocol> <verb> failed: <detail>"` pattern across every coroutine error enum.
+
 - Replaced every per-coroutine `*Result` enum with `HttpCoroutineState<Y, R>`; per-coroutine `Output` structs (`HttpSendOutput`, `Http11ReadChunksOutput`, `Http11ReadHeadersOutput`, `WellKnownOutput`) hold the previous `Ok { … }` fields. Shared `HttpSendOutput` and `HttpSendYield` moved to `rfc9110::send`, reused by both `Http10Send` and `Http11Send`.
 
 ## [0.0.3] - 2025-10-24

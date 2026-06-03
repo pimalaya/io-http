@@ -1,9 +1,6 @@
-//! I/O-free coroutine decoding a `Transfer-Encoding: chunked` response
-//! body ([RFC 9112 §7.1]) one chunk at a time.
-//!
-//! Unlike [`super::chunk::Http11ReadChunks`], yields each decoded chunk
-//! as soon as its body bytes are available, suitable for long-lived
-//! responses (W3C Server-Sent Events, line-delimited JSON streams).
+//! I/O-free coroutine decoding a `Transfer-Encoding: chunked` body
+//! ([RFC 9112 §7.1]) one chunk at a time; suitable for SSE and other
+//! long-lived streams.
 //!
 //! [RFC 9112 §7.1]: https://www.rfc-editor.org/rfc/rfc9112#section-7.1
 
@@ -27,17 +24,11 @@ pub enum Http11ReadChunksStreamError {
     InvalidChunkSize(String),
 }
 
-/// Per-step yield emitted by [`Http11ReadChunksStream`].
-///
-/// Extends the standard [`HttpYield`] with the [`Self::Frame`] variant
-/// so callers can consume each decoded chunk as soon as its body bytes
-/// are available.
+/// Per-step yield emitted by [`Http11ReadChunksStream`]; adds
+/// [`Self::Frame`] to the standard [`HttpYield`] shape.
 #[derive(Debug)]
 pub enum Http11ReadChunksStreamYield {
-    /// Driver should read more bytes from the socket.
     WantsRead,
-    /// A complete chunk body has been decoded. The caller should
-    /// consume `body` and resume the coroutine to pull the next chunk.
     Frame { body: Vec<u8> },
 }
 
@@ -57,13 +48,8 @@ impl fmt::Display for State {
     }
 }
 
-/// I/O-free coroutine to read an HTTP response body using chunked
-/// transfer coding, yielding each decoded chunk as soon as it
-/// arrives.
-///
-/// On `Complete(Ok(remaining))`, `remaining` carries any bytes already
-/// buffered past the zero-length terminator (typically the start of
-/// the next pipelined response on the same connection).
+/// I/O-free streaming chunked-body decoder. `Complete(Ok(remaining))`
+/// carries bytes already buffered past the zero-length terminator.
 #[derive(Debug, Default)]
 pub struct Http11ReadChunksStream {
     state: State,

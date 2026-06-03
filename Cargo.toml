@@ -24,6 +24,19 @@ rustls-aws = ["client", "pimalaya-stream/rustls-aws", "dep:anyhow", "dep:pimalay
 native-tls = ["client", "pimalaya-stream/native-tls", "dep:anyhow", "dep:pimalaya-stream"]
 vendored = ["pimalaya-stream?/vendored"]
 
+[[example]]
+name = "std_http10"
+path = "examples/std_http10.rs"
+
+[[example]]
+name = "tokio_http11"
+path = "examples/tokio_http11.rs"
+
+[[example]]
+name = "std_http11"
+path = "examples/std_http11.rs"
+required-features = ["rustls-ring"]
+
 [dev-dependencies]
 env_logger = "0.11"
 rustls = { version = "0.23", default-features = false, features = ["logging", "ring", "std", "tls12"] }
@@ -44,8 +57,11 @@ thiserror = { version = "2", default-features = false }
 url = { version = "2.5", default-features = false }
 
 [patch.crates-io]
+#
 # local
+#
 # pimalaya-stream.path = "../stream"
-
+#
 # git
+#
 # pimalaya-stream.git = "https://github.com/pimalaya/stream"

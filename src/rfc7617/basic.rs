@@ -2,6 +2,20 @@
 //! base64-encoded `username:password` pair in the `Authorization`
 //! request header ([RFC 7617 §2]).
 //!
+//! # Example
+//!
+//! ```rust
+//! use io_http::rfc7617::basic::BasicCredentials;
+//! use secrecy::ExposeSecret;
+//!
+//! let creds = BasicCredentials::new("Aladdin", "open sesame");
+//! assert_eq!(creds.to_authorization(), "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==");
+//!
+//! let parsed = BasicCredentials::from_authorization("Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==").unwrap();
+//! assert_eq!(parsed.username, "Aladdin");
+//! assert_eq!(parsed.password.expose_secret(), "open sesame");
+//! ```
+//!
 //! [RFC 7617 §2]: https://www.rfc-editor.org/rfc/rfc7617#section-2
 
 use core::{fmt, str::from_utf8};
@@ -28,38 +42,16 @@ pub enum BasicError {
     MissingColon,
 }
 
-/// An HTTP `Basic` credential pair (username and password).
-///
-/// The password is stored as a [`SecretString`]: it is redacted in
-/// [`fmt::Debug`] output and zeroed in memory on drop.  Use
-/// `credentials.password.expose_secret()` to access the raw password
-/// string.
-///
-/// # Example
-///
-/// ```rust
-/// use io_http::rfc7617::basic::BasicCredentials;
-/// use secrecy::ExposeSecret;
-///
-/// let creds = BasicCredentials::new("Aladdin", "open sesame");
-/// assert_eq!(creds.to_authorization(), "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==");
-///
-/// let parsed = BasicCredentials::from_authorization("Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==").unwrap();
-/// assert_eq!(parsed.username, "Aladdin");
-/// assert_eq!(parsed.password.expose_secret(), "open sesame");
-/// ```
+/// HTTP `Basic` credential pair; `password` is redacted in
+/// [`fmt::Debug`] and zeroed on drop.
 #[derive(Clone)]
 pub struct BasicCredentials {
-    /// The username.
     pub username: String,
-    /// The password.
-    ///
-    /// Use [`ExposeSecret::expose_secret`] to access the value.
     pub password: SecretString,
 }
 
 impl BasicCredentials {
-    /// Creates a new credential pair.
+    /// Wraps a username + password.
     pub fn new(username: impl Into<String>, password: impl Into<String>) -> Self {
         Self {
             username: username.into(),
@@ -67,19 +59,14 @@ impl BasicCredentials {
         }
     }
 
-    /// Returns the `Authorization` header value: `Basic <base64(username:password)>`.
+    /// Returns the `Basic <base64(user:pass)>` header value.
     pub fn to_authorization(&self) -> String {
         let payload = format!("{}:{}", self.username, self.password.expose_secret());
         let encoded = BASE64_STANDARD.encode(payload.as_bytes());
         format!("Basic {encoded}")
     }
 
-    /// Parses an `Authorization` header value of the form `Basic
-    /// <b64>`.
-    ///
-    /// Returns an error if the prefix is missing, the base64 is
-    /// invalid, or the decoded string does not contain a `:`
-    /// separator.
+    /// Parses a `Basic <b64>` header value.
     pub fn from_authorization(value: &str) -> Result<Self, BasicError> {
         let encoded = value
             .strip_prefix("Basic ")

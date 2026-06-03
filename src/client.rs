@@ -1,12 +1,9 @@
-//! Standard, blocking HTTP/1.X client wrapping a single boxed `Read + Write +
-//! Send` stream and exposing one method per common coroutine. HTTP has no
-//! long-lived session context: each [`HttpClientStd::send`] /
-//! [`HttpClientStd::send_http10`] is self-contained.
-//!
-//! The bare [`HttpClientStd::new`] takes a pre-connected stream; callers handle
-//! TCP and TLS themselves. With a TLS feature enabled (`rustls-ring`,
-//! `rustls-aws`, `native-tls`), [`HttpClientStd::connect`] handles `http://` /
-//! `https://` URLs end-to-end via [`pimalaya_stream::std::stream::StreamStd`].
+//! Standard, blocking HTTP/1.X client wrapping a boxed
+//! `Read + Write + Send` stream. Each [`HttpClientStd::send`] /
+//! [`HttpClientStd::send_http10`] is self-contained (HTTP has no
+//! session context). With a TLS feature enabled,
+//! [`HttpClientStd::connect`] opens `http://` / `https://` URLs
+//! end-to-end via [`pimalaya_stream::std::stream::StreamStd`].
 
 #[cfg(any(
     feature = "rustls-aws",
@@ -42,9 +39,8 @@ use crate::{
 
 const READ_BUFFER_SIZE: usize = 16 * 1024;
 
-/// Default ALPN protocol identifier offered during the TLS handshake for HTTPS
-/// connections ([RFC 7301] + IANA registry: `http/1.1`).  Shared by
-/// config-driven callers as a serde default and by wizard/discovery code.
+/// Default ALPN identifier for HTTPS connections: `http/1.1`
+/// ([RFC 7301] + IANA registry).
 ///
 /// [RFC 7301]: https://www.rfc-editor.org/rfc/rfc7301
 pub fn default_alpn() -> Vec<String> {
@@ -93,25 +89,21 @@ pub enum HttpClientStdError {
     ChunkStream(#[from] Http11ReadChunksStreamError),
 }
 
-/// Std-blocking HTTP client wrapping a single boxed `Read + Write +
-/// Send` stream.
+/// Std-blocking HTTP client wrapping a boxed `Read + Write + Send` stream.
 pub struct HttpClientStd {
     stream: Box<dyn HttpStream>,
 }
 
 impl HttpClientStd {
-    /// Builds a client around `stream`. The caller is responsible for opening
-    /// the connection (TCP, TLS handshake if needed).
+    /// Wraps a pre-connected stream; caller handles TCP and TLS.
     pub fn new<S: Read + Write + Send + 'static>(stream: S) -> Self {
         Self {
             stream: Box::new(stream),
         }
     }
 
-    /// Connects to `url` and runs the TLS handshake when the scheme is
-    /// `https`. `http` URLs go through plain TCP. ALPN is read from
-    /// `tls.rustls.alpn` (see [`default_alpn`] for the HTTP/1.1-conformant
-    /// `["http/1.1"]`); an empty vec skips ALPN.
+    /// Connects to `url` (TLS handshake on `https`), reading ALPN from
+    /// `tls.rustls.alpn` (see [`default_alpn`]).
     #[cfg(any(
         feature = "rustls-aws",
         feature = "rustls-ring",
@@ -140,21 +132,16 @@ impl HttpClientStd {
         })
     }
 
-    /// Replaces the underlying stream — useful when the server signals
-    /// `Connection: close` or redirects to a different authority and a fresh
-    /// transport must be opened.
+    /// Replaces the underlying stream (e.g. after `Connection: close` or
+    /// a cross-authority redirect).
     pub fn set_stream<S: Read + Write + Send + 'static>(&mut self, stream: S) {
         self.stream = Box::new(stream);
     }
 
-    /// Drives any standard-shape coroutine (`Yield = HttpYield`, `Return =
-    /// Result<Output, Error>`) against the wrapped stream until it terminates.
-    ///
-    /// Coroutines that need richer Yield variants (e.g. [`Http11Send`] with
-    /// [`HttpSendYield::WantsRedirect`], or [`Http11ReadChunksStream`] /
-    /// [`SseFrameParser`] for streaming) are driven by their own per-method
-    /// loops on this client; see [`Self::send`], [`Self::send_streaming`], and
-    /// [`SseStream`].
+    /// Drives any standard-shape coroutine against the wrapped stream
+    /// until it completes. Coroutines with richer Yield variants
+    /// (`Http*Send`, `Http11ReadChunksStream`, `SseFrameParser`) use
+    /// their own per-method loops below.
     pub fn run<C, T, E>(&mut self, mut coroutine: C) -> Result<T, HttpClientStdError>
     where
         C: HttpCoroutine<Yield = HttpYield, Return = Result<T, E>>,
@@ -179,10 +166,8 @@ impl HttpClientStd {
         }
     }
 
-    /// Runs [`Http11Send`] (RFC 9112): sends `request` over the underlying
-    /// stream and reads back the response. Returns
-    /// [`HttpClientStdError::UnexpectedRedirect`] on 3xx; the caller can
-    /// inspect the URL and retry against a new client.
+    /// Runs [`Http11Send`]; surfaces 3xx as
+    /// [`HttpClientStdError::UnexpectedRedirect`].
     pub fn send(&mut self, request: HttpRequest) -> Result<HttpSendOutput, HttpClientStdError> {
         let mut coroutine = Http11Send::new(request);
         let mut buf = [0u8; READ_BUFFER_SIZE];
@@ -212,11 +197,7 @@ impl HttpClientStd {
         }
     }
 
-    /// Runs [`Http10Send`] (RFC 1945): same as [`send`] but speaks
-    /// HTTP/1.0. Use this only when targeting a server that does not support
-    /// HTTP/1.1.
-    ///
-    /// [`send`]: HttpClientStd::send
+    /// HTTP/1.0 counterpart of [`Self::send`].
     pub fn send_http10(
         &mut self,
         request: HttpRequest,
@@ -251,18 +232,8 @@ impl HttpClientStd {
 }
 
 impl HttpClientStd {
-    /// Opens a streaming HTTP/1.1 response for [Server-Sent Events]:
-    /// writes `request`, reads response headers, requires
-    /// `Transfer-Encoding: chunked`, and hands the body off to the
-    /// returned [`SseStream`] iterator.
-    ///
-    /// Consumes `self` because the underlying connection becomes
-    /// dedicated to the streaming response and cannot be reused for
-    /// pipelined requests. The caller drops or closes the stream when
-    /// done. Pre-read body bytes (received in the same socket read as
-    /// the headers) are forwarded to the stream automatically.
-    ///
-    /// [Server-Sent Events]: https://html.spec.whatwg.org/multipage/server-sent-events.html
+    /// Opens an HTTP/1.1 SSE stream; requires `Transfer-Encoding: chunked`.
+    /// Consumes `self` because the connection is dedicated to the stream.
     pub fn send_streaming(self, request: HttpRequest) -> Result<SseStream, HttpClientStdError> {
         let HttpClientStd { mut stream } = self;
 
@@ -316,11 +287,9 @@ impl HttpClientStd {
     }
 }
 
-/// Long-lived streaming HTTP/1.1 response carrying a Server-Sent
-/// Events body. Each call to [`SseStream::next_frame`] (or
-/// [`Iterator::next`]) drives the chunked-transfer decoder and the
-/// SSE frame parser, blocking on socket reads until the next event
-/// arrives or the connection closes.
+/// Long-lived HTTP/1.1 Server-Sent Events stream; each
+/// [`SseStream::next_frame`] / [`Iterator::next`] blocks until the next
+/// event arrives or the connection closes.
 pub struct SseStream {
     stream: Box<dyn HttpStream>,
     chunk_stream: Http11ReadChunksStream,
@@ -333,29 +302,23 @@ pub struct SseStream {
 }
 
 impl SseStream {
-    /// Returns the parsed response headers (body is empty since the
-    /// body is the streaming SSE channel itself).
+    /// Parsed response headers (body is the streaming channel itself).
     pub fn response(&self) -> &HttpResponse {
         &self.response
     }
 
-    /// Whether the server signalled the connection can be reused
-    /// after the stream ends. SSE servers typically use
-    /// `Connection: keep-alive` and only close on shutdown.
+    /// Whether the server signalled the connection can be reused.
     pub fn keep_alive(&self) -> bool {
         self.keep_alive
     }
 
-    /// Returns the last-event-id seen on the stream so far, ready to
-    /// be supplied via `Last-Event-ID` on a reconnection attempt.
+    /// Last-event-id seen so far; supply via `Last-Event-ID` on reconnect.
     pub fn last_event_id(&self) -> Option<&str> {
         self.sse_parser.last_event_id()
     }
 
-    /// Drives the chunked decoder and SSE frame parser until the next
-    /// event is dispatched, blocking on socket reads. Returns
-    /// [`None`] once the server closes the connection or sends the
-    /// zero-length chunk terminator.
+    /// Drives chunked + SSE decoding until the next event; [`None`] on
+    /// connection close or zero-length chunk terminator.
     pub fn next_frame(&mut self) -> Result<Option<SseFrame>, HttpClientStdError> {
         if self.done {
             return Ok(None);
@@ -381,8 +344,7 @@ impl SseStream {
         }
     }
 
-    /// Closes the underlying connection. Equivalent to dropping the
-    /// stream; provided for explicit shutdown at the call site.
+    /// Closes the underlying connection (equivalent to dropping `self`).
     pub fn close(self) {
         drop(self);
     }
@@ -427,10 +389,8 @@ impl Iterator for SseStream {
     }
 }
 
-/// Marker for everything the client can run against; auto-implemented for any
-/// blocking `Read + Write + Send` impl. The `Send` supertrait flows the
-/// auto-trait through the `Box<dyn Stream>` type erasure so `HttpClientStd` can
-/// travel between threads. Every concrete stream the pimalaya stack hands in is
-/// already `Send`.
+// Marker for everything the client can run against; the `Send`
+// supertrait propagates through the `Box<dyn HttpStream>` erasure so
+// `HttpClientStd` stays `Send`.
 trait HttpStream: Read + Write + Send {}
 impl<T: Read + Write + Send + ?Sized> HttpStream for T {}
