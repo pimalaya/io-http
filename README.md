@@ -136,7 +136,7 @@ Enable the `client` feature. `HttpClientStd::new(stream)` wraps any blocking `Re
 
 ```toml,ignore
 [dependencies]
-io-http = { version = "0.1.0", default-features = false, features = ["client"] }
+io-http = { version = "0.1.1", default-features = false, features = ["client"] }
 ```
 
 ```rust,no_run
@@ -175,7 +175,7 @@ Enable one of the TLS feature flags: `rustls-ring` (default), `rustls-aws`, or `
 
 ```toml,ignore
 [dependencies]
-io-http = "0.1.0" # rustls-ring is enabled by default
+io-http = "0.1.1" # rustls-ring is enabled by default
 ```
 
 ```rust,no_run
