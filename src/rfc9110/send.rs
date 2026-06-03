@@ -1,15 +1,16 @@
 //! Shared output and yield types for HTTP request-response coroutines.
 //!
-//! Both [`Http10Send`](crate::rfc1945::send::Http10Send) and
-//! [`Http11Send`](crate::rfc9112::send::Http11Send) return the same
-//! shape on success ([`HttpSendOutput`]) and emit the same intermediate
-//! yield variants ([`HttpSendYield`]).
+//! Both [`Http10Send`] and [`Http11Send`] return [`HttpSendOutput`] on
+//! success and emit [`HttpSendYield`] on every intermediate step.
+//!
+//! [`Http10Send`]: crate::rfc1945::send::Http10Send
+//! [`Http11Send`]: crate::rfc9112::send::Http11Send
 
 use alloc::vec::Vec;
 
 use url::Url;
 
-use crate::rfc9110::response::HttpResponse;
+use crate::{coroutine::HttpYield, rfc9110::response::HttpResponse};
 
 /// Terminal output of a successful HTTP request-response exchange.
 ///
@@ -59,4 +60,13 @@ pub enum HttpSendYield {
         /// user consent is inadvisable (RFC 9110 §15.4).
         same_origin: bool,
     },
+}
+
+impl From<HttpYield> for HttpSendYield {
+    fn from(y: HttpYield) -> Self {
+        match y {
+            HttpYield::WantsRead => Self::WantsRead,
+            HttpYield::WantsWrite(bytes) => Self::WantsWrite(bytes),
+        }
+    }
 }

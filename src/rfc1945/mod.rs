@@ -1,16 +1,15 @@
-//! HTTP/1.0 message syntax (RFC 1945).
+//! HTTP/1.0 message syntax ([RFC 1945]).
 //!
-//! This module implements the HTTP/1.0 wire protocol as I/O-free
-//! coroutines. No sockets, no async runtime, and no `std` are
-//! required.
+//! I/O-free coroutines implementing the HTTP/1.0 wire protocol: no sockets, no
+//! async runtime, no `std`. Shared types live in [`crate::rfc9110`].
 //!
-//! Shared types (status codes, headers, request, response) live in
-//! [`crate::rfc9110`].
+//! Differences from HTTP/1.1 ([`crate::rfc9112`]):
 //!
-//! Key differences from HTTP/1.1 ([`crate::rfc9112`]):
-//! - No chunked transfer encoding (`Transfer-Encoding` is not defined)
-//! - Connections close after each request by default
-//! - `Host` header is not mandatory
+//! - No chunked transfer encoding (`Transfer-Encoding` is undefined).
+//! - Connections close after each request by default.
+//! - `Host` header is not mandatory.
+//!
+//! [RFC 1945]: https://www.rfc-editor.org/rfc/rfc1945
 
 pub mod request;
 pub mod send;

@@ -1,46 +1,12 @@
-//! I/O-free coroutine to discover a service endpoint via the
-//! `.well-known` URI scheme (RFC 8615).
+//! I/O-free coroutine performing a `.well-known` URI discovery request
+//! ([RFC 8615]).
 //!
-//! The discovery flow is a single HTTP exchange:
+//! Wraps [`Http11Send`] and surfaces the resolved redirect URL (when
+//! the server returned a 3xx with a parseable `Location`) as part of
+//! the terminal output. Use [`WellKnown::prepare_request`] to build a
+//! correctly-shaped GET on `/.well-known/{service}`.
 //!
-//! 1. Client sends `GET /.well-known/{service}` to the origin.
-//! 2. Server responds. Inspect `redirect_url` on the
-//!    [`WellKnownOutput`] to know whether the server redirected (the
-//!    expected case) or responded directly.
-//!
-//! Use [`WellKnown::prepare_request`] to build the request, then drive
-//! the coroutine with [`WellKnown::resume`]:
-//!
-//! ```rust,ignore
-//! use std::{io::{Read, Write}, net::TcpStream};
-//! use io_http::{coroutine::*, rfc8615::well_known::WellKnown};
-//!
-//! let request = WellKnown::prepare_request("http://example.com", "caldav").unwrap();
-//! let mut stream = TcpStream::connect("example.com:80").unwrap();
-//! let mut well_known = WellKnown::new(request);
-//! let mut arg: Option<&[u8]> = None;
-//! let mut buf = [0u8; 4096];
-//!
-//! loop {
-//!     match well_known.resume(arg.take()) {
-//!         HttpCoroutineState::Complete(Ok(out)) if out.redirect_url.is_some() => {
-//!             println!("caldav endpoint: {}", out.redirect_url.unwrap());
-//!             break;
-//!         }
-//!         HttpCoroutineState::Complete(Ok(out)) => {
-//!             panic!("expected redirect, got {}", *out.response.status);
-//!         }
-//!         HttpCoroutineState::Complete(Err(err)) => panic!("{err}"),
-//!         HttpCoroutineState::Yielded(HttpYield::WantsRead) => {
-//!             let n = stream.read(&mut buf).unwrap();
-//!             arg = Some(&buf[..n]);
-//!         }
-//!         HttpCoroutineState::Yielded(HttpYield::WantsWrite(bytes)) => {
-//!             stream.write_all(&bytes).unwrap();
-//!         }
-//!     }
-//! }
-//! ```
+//! [RFC 8615]: https://www.rfc-editor.org/rfc/rfc8615
 
 use alloc::{format, string::String};
 
@@ -53,12 +19,12 @@ use crate::{
     rfc9112::send::{Http11Send, Http11SendError},
 };
 
-/// Errors that can occur during the coroutine progression.
+/// Failure causes during the HTTP well-known discovery flow.
 #[derive(Debug, Error)]
 pub enum WellKnownError {
-    #[error("Invalid base URL {1}")]
+    #[error("HTTP well-known failed: invalid base URL `{1}`")]
     InvalidBaseUrl(#[source] ParseError, String),
-    #[error(transparent)]
+    #[error("HTTP well-known failed: {0}")]
     Send(#[from] Http11SendError),
 }
 
@@ -156,7 +122,9 @@ impl HttpCoroutine for WellKnown {
 
 #[cfg(test)]
 mod tests {
-    use crate::rfc8615::well_known::*;
+    use alloc::vec::Vec;
+
+    use super::*;
 
     #[test]
     fn prepare_request_sets_well_known_path() {
@@ -179,7 +147,89 @@ mod tests {
 
     #[test]
     fn prepare_request_rejects_invalid_url() {
-        let result = WellKnown::prepare_request("not a url", "caldav");
-        assert!(result.is_err(), "expected Err for an invalid base URL");
+        let err = WellKnown::prepare_request("not a url", "caldav").unwrap_err();
+        let WellKnownError::InvalidBaseUrl(_, base) = err else {
+            panic!("expected InvalidBaseUrl, got {err:?}");
+        };
+        assert_eq!(base, "not a url");
+    }
+
+    #[test]
+    fn redirect_surfaces_redirect_url() {
+        let req = WellKnown::prepare_request("http://example.com", "caldav").unwrap();
+        let mut coroutine = WellKnown::new(req);
+
+        let _bytes = expect_wants_write(&mut coroutine, None);
+        expect_wants_read(&mut coroutine, None);
+
+        let reply =
+            b"HTTP/1.1 301 Moved Permanently\r\nLocation: /caldav\r\nContent-Length: 0\r\n\r\n";
+        let out = expect_complete_ok(&mut coroutine, Some(reply));
+        let url = out.redirect_url.expect("redirect URL should be set");
+        assert_eq!(url.path(), "/caldav");
+        assert!(out.same_origin);
+    }
+
+    #[test]
+    fn non_redirect_completes_without_redirect_url() {
+        let req = WellKnown::prepare_request("http://example.com", "caldav").unwrap();
+        let mut coroutine = WellKnown::new(req);
+
+        expect_wants_write(&mut coroutine, None);
+        expect_wants_read(&mut coroutine, None);
+
+        let reply = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+        let out = expect_complete_ok(&mut coroutine, Some(reply));
+        assert!(out.redirect_url.is_none());
+        assert_eq!(*out.response.status, 200);
+    }
+
+    #[test]
+    fn parse_error_propagates_as_send_failure() {
+        let req = WellKnown::prepare_request("http://example.com", "caldav").unwrap();
+        let mut coroutine = WellKnown::new(req);
+
+        expect_wants_write(&mut coroutine, None);
+        expect_wants_read(&mut coroutine, None);
+
+        let reply = b"HTTP/1.1 200 OK\r\nContent-Length: notanumber\r\n\r\n";
+        let err = expect_complete_err(&mut coroutine, Some(reply));
+        assert!(
+            matches!(
+                err,
+                WellKnownError::Send(Http11SendError::InvalidContentLength(_))
+            ),
+            "expected Send(InvalidContentLength), got {err:?}",
+        );
+    }
+
+    // --- utils
+
+    fn expect_wants_write(cor: &mut WellKnown, arg: Option<&[u8]>) -> Vec<u8> {
+        match cor.resume(arg) {
+            HttpCoroutineState::Yielded(HttpYield::WantsWrite(bytes)) => bytes,
+            state => panic!("expected WantsWrite, got {state:?}"),
+        }
+    }
+
+    fn expect_wants_read(cor: &mut WellKnown, arg: Option<&[u8]>) {
+        match cor.resume(arg) {
+            HttpCoroutineState::Yielded(HttpYield::WantsRead) => {}
+            state => panic!("expected WantsRead, got {state:?}"),
+        }
+    }
+
+    fn expect_complete_ok(cor: &mut WellKnown, arg: Option<&[u8]>) -> WellKnownOutput {
+        match cor.resume(arg) {
+            HttpCoroutineState::Complete(Ok(out)) => out,
+            state => panic!("expected Complete(Ok), got {state:?}"),
+        }
+    }
+
+    fn expect_complete_err(cor: &mut WellKnown, arg: Option<&[u8]>) -> WellKnownError {
+        match cor.resume(arg) {
+            HttpCoroutineState::Complete(Err(err)) => err,
+            state => panic!("expected Complete(Err), got {state:?}"),
+        }
     }
 }

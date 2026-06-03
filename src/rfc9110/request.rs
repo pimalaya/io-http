@@ -1,4 +1,6 @@
-//! HTTP request type (RFC 9110 §9).
+//! HTTP request type ([RFC 9110 §9]).
+//!
+//! [RFC 9110 §9]: https://www.rfc-editor.org/rfc/rfc9110#section-9
 
 use core::fmt;
 

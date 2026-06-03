@@ -1,7 +1,7 @@
-//! OAuth 2.0 Bearer token usage.
+//! OAuth 2.0 Bearer token usage: tokens are transmitted as-is in the
+//! `Authorization` request header ([RFC 6750 §2.1]).
 //!
-//! Bearer tokens are transmitted as-is in the `Authorization` request
-//! header (RFC 6750 §2.1).
+//! [RFC 6750 §2.1]: https://www.rfc-editor.org/rfc/rfc6750#section-2.1
 
 use core::fmt;
 
@@ -10,10 +10,10 @@ use alloc::{format, string::String};
 use secrecy::{ExposeSecret, SecretString};
 use thiserror::Error;
 
-/// Errors that can occur when parsing a `Bearer` authorization value.
+/// Failure causes when parsing a `Bearer` authorization value.
 #[derive(Debug, Error)]
 pub enum BearerError {
-    #[error("missing 'Bearer ' prefix in Authorization value")]
+    #[error("Missing `Bearer ` prefix in Authorization value")]
     MissingPrefix,
 }
 

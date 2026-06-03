@@ -1,25 +1,23 @@
 //! I/O-free coroutine to read and parse an HTTP/1.X response head
-//! (RFC 9112 §6).
+//! ([RFC 9112 §6]).
 //!
-//! Accumulates bytes from the socket until the `\r\n\r\n` head
-//! terminator is seen, parses the status line + headers via
-//! `httparse`, and emits an [`HttpResponse`] with an empty body. Any
-//! bytes that came past the terminator are returned in `remaining`
+//! Accumulates bytes until the `\r\n\r\n` head terminator, parses the
+//! status line + headers via `httparse`, and emits an [`HttpResponse`]
+//! with an empty body. Pre-read body bytes are returned in `remaining`
 //! so the caller can hand them off to a body-decoding coroutine
-//! (chunked transfer, content-length, or a streaming consumer such
-//! as Server-Sent Events).
+//! (chunked, content-length, read-to-EOF, SSE...). `keep_alive`
+//! defaults by version when `Connection` is absent (HTTP/1.0 → `false`,
+//! HTTP/1.1 → `true`).
 //!
-//! `keep_alive` is derived from the `Connection` header: present and
-//! `close` → `false`; absent → defaults by version (HTTP/1.0 →
-//! `false`, HTTP/1.1 → `true`).
+//! Composed by [`super::send::Http11Send`] /
+//! [`crate::rfc1945::send::Http10Send`] and reused by the SSE bootstrap
+//! in [`crate::client::HttpClientStd::send_streaming`].
 //!
-//! Composed by [`super::send::Http11Send`] (which dispatches to a
-//! body-reading coroutine after the head) and reused by the SSE
-//! bootstrap in [`crate::client::HttpClientStd::send_streaming`].
+//! [RFC 9112 §6]: https://www.rfc-editor.org/rfc/rfc9112#section-6
 
 use alloc::vec::Vec;
 
-use httparse::{EMPTY_HEADER, Response, Status};
+use httparse::{EMPTY_HEADER, Error as HttparseError, Response, Status};
 use log::trace;
 use thiserror::Error;
 
@@ -34,13 +32,13 @@ use crate::{
     rfc9112::version::HTTP_11,
 };
 
-/// Errors that can occur during the coroutine progression.
+/// Failure causes during the HTTP/1.X read-headers flow.
 #[derive(Debug, Error)]
 pub enum Http11ReadHeadersError {
-    #[error("Reached unexpected EOF before headers were complete")]
+    #[error("HTTP/1.X read headers failed: reached unexpected EOF before headers were complete")]
     Eof,
-    #[error("Parse HTTP response headers error: {0}")]
-    ParseResponseHeaders(httparse::Error),
+    #[error("HTTP/1.X read headers failed: parse response headers: {0}")]
+    ParseResponseHeaders(HttparseError),
 }
 
 /// Terminal output of [`Http11ReadHeaders`].
@@ -103,8 +101,6 @@ impl HttpCoroutine for Http11ReadHeaders {
 
         let keep_alive = match builder.get_header(CONNECTION) {
             Some(conn) => !conn.eq_ignore_ascii_case("close"),
-            // HTTP/1.0 closes connections by default; HTTP/1.1 keeps
-            // them alive.
             None => !is_http10,
         };
 
@@ -118,5 +114,89 @@ impl HttpCoroutine for Http11ReadHeaders {
             remaining,
             keep_alive,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_complete_head() {
+        let mut coroutine = Http11ReadHeaders::default();
+        let reply = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nbody";
+
+        let out = expect_complete_ok(&mut coroutine, Some(reply));
+        assert_eq!(*out.response.status, 200);
+        assert_eq!(out.response.version, "HTTP/1.1");
+        assert_eq!(out.response.header("content-type"), Some("text/plain"));
+        assert_eq!(out.remaining, b"body");
+    }
+
+    #[test]
+    fn incomplete_head_wants_read() {
+        let mut coroutine = Http11ReadHeaders::default();
+        expect_wants_read(&mut coroutine, Some(b"HTTP/1.1 200 OK\r\n"));
+    }
+
+    #[test]
+    fn eof_returns_eof_error() {
+        let mut coroutine = Http11ReadHeaders::default();
+        let err = expect_complete_err(&mut coroutine, Some(b""));
+        assert!(matches!(err, Http11ReadHeadersError::Eof));
+    }
+
+    #[test]
+    fn http10_keep_alive_defaults_false() {
+        let mut coroutine = Http11ReadHeaders::default();
+        let reply = b"HTTP/1.0 200 OK\r\n\r\n";
+        let out = expect_complete_ok(&mut coroutine, Some(reply));
+        assert!(!out.keep_alive);
+        assert_eq!(out.response.version, "HTTP/1.0");
+    }
+
+    #[test]
+    fn http11_keep_alive_defaults_true() {
+        let mut coroutine = Http11ReadHeaders::default();
+        let reply = b"HTTP/1.1 200 OK\r\n\r\n";
+        let out = expect_complete_ok(&mut coroutine, Some(reply));
+        assert!(out.keep_alive);
+    }
+
+    #[test]
+    fn connection_close_overrides_default() {
+        let mut coroutine = Http11ReadHeaders::default();
+        let reply = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n";
+        let out = expect_complete_ok(&mut coroutine, Some(reply));
+        assert!(!out.keep_alive);
+    }
+
+    // --- utils
+
+    fn expect_wants_read(cor: &mut Http11ReadHeaders, arg: Option<&[u8]>) {
+        match cor.resume(arg) {
+            HttpCoroutineState::Yielded(HttpYield::WantsRead) => {}
+            state => panic!("expected WantsRead, got {state:?}"),
+        }
+    }
+
+    fn expect_complete_ok(
+        cor: &mut Http11ReadHeaders,
+        arg: Option<&[u8]>,
+    ) -> Http11ReadHeadersOutput {
+        match cor.resume(arg) {
+            HttpCoroutineState::Complete(Ok(out)) => out,
+            state => panic!("expected Complete(Ok), got {state:?}"),
+        }
+    }
+
+    fn expect_complete_err(
+        cor: &mut Http11ReadHeaders,
+        arg: Option<&[u8]>,
+    ) -> Http11ReadHeadersError {
+        match cor.resume(arg) {
+            HttpCoroutineState::Complete(Err(err)) => err,
+            state => panic!("expected Complete(Err), got {state:?}"),
+        }
     }
 }

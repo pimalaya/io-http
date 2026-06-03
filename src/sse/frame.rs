@@ -1,19 +1,17 @@
-//! I/O-free coroutine to decode a W3C Server-Sent Events stream
-//! (HTML Living Standard, "Server-sent events" section,
-//! <https://html.spec.whatwg.org/multipage/server-sent-events.html>).
+//! I/O-free coroutine decoding a W3C [Server-Sent Events] stream.
 //!
-//! Bytes are appended via [`SseFrameParser::resume`]; each call
-//! returns the next dispatched event as a
-//! [`SseFrameParserYield::Frame`], or
-//! [`SseFrameParserYield::WantsBytes`] when more input is needed.
-//! The parser is driven by a streaming HTTP body coroutine (typically
-//! [`crate::rfc9112::chunk_stream::Http11ReadChunksStream`]); the
-//! caller forwards each decoded chunk into this parser and pumps it
-//! until it asks for more.
+//! Bytes are appended via [`SseFrameParser::resume`]; each call returns
+//! the next dispatched event as a [`SseFrameParserYield::Frame`], or
+//! [`SseFrameParserYield::WantsBytes`] when more input is needed. The
+//! parser is driven by a streaming body coroutine (typically
+//! [`crate::rfc9112::chunk_stream::Http11ReadChunksStream`]); the caller
+//! forwards each decoded chunk in and pumps until it asks for more.
 //!
 //! The parser never reaches a terminal state; its `Return` is
 //! [`Infallible`]. The outer driver stops resuming when the underlying
 //! body stream closes.
+//!
+//! [Server-Sent Events]: https://html.spec.whatwg.org/multipage/server-sent-events.html
 
 use core::{convert::Infallible, mem, str};
 

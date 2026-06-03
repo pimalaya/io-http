@@ -1,28 +1,20 @@
-//! # Standard, blocking HTTP/1.X client
+//! Standard, blocking HTTP/1.X client wrapping a single boxed `Read + Write +
+//! Send` stream and exposing one method per common coroutine. HTTP has no
+//! long-lived session context: each [`HttpClientStd::send`] /
+//! [`HttpClientStd::send_http10`] is self-contained.
 //!
-//! Holds a single boxed `Read + Write + Send` stream and exposes one
-//! method per common coroutine. HTTP has no
-//! long-lived session context: each [`send`] / [`send_http10`] is
-//! self-contained.
-//!
-//! The bare [`new`] constructor takes a pre-connected stream;
-//! callers handle TCP and TLS themselves. With one of the TLS feature
-//! flags enabled (`rustls-ring`, `rustls-aws`, `native-tls`),
-//! [`connect`] is also available and handles `http://` / `https://`
-//! URLs end-to-end via [`pimalaya_stream::std::stream::StreamStd`].
-//!
-//! [`new`]: HttpClientStd::new
-//! [`connect`]: HttpClientStd::connect
-//! [`send`]: HttpClientStd::send
-//! [`send_http10`]: HttpClientStd::send_http10
+//! The bare [`HttpClientStd::new`] takes a pre-connected stream; callers handle
+//! TCP and TLS themselves. With a TLS feature enabled (`rustls-ring`,
+//! `rustls-aws`, `native-tls`), [`HttpClientStd::connect`] handles `http://` /
+//! `https://` URLs end-to-end via [`pimalaya_stream::std::stream::StreamStd`].
 
 #[cfg(any(
     feature = "rustls-aws",
     feature = "rustls-ring",
     feature = "native-tls"
 ))]
-use alloc::string::{String, ToString};
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::string::ToString;
+use alloc::{boxed::Box, string::String, vec, vec::Vec};
 
 use std::io::{self, Read, Write};
 
@@ -50,10 +42,11 @@ use crate::{
 
 const READ_BUFFER_SIZE: usize = 16 * 1024;
 
-/// Default ALPN protocol identifier offered during the TLS handshake
-/// for HTTPS connections (RFC 7301 + IANA registry: `http/1.1`).
-/// Re-exported so config-driven callers can use it as a serde default
-/// and so wizard/discovery code shares a single source of truth.
+/// Default ALPN protocol identifier offered during the TLS handshake for HTTPS
+/// connections ([RFC 7301] + IANA registry: `http/1.1`).  Shared by
+/// config-driven callers as a serde default and by wizard/discovery code.
+///
+/// [RFC 7301]: https://www.rfc-editor.org/rfc/rfc7301
 pub fn default_alpn() -> Vec<String> {
     vec![String::from("http/1.1")]
 }
@@ -103,22 +96,22 @@ pub enum HttpClientStdError {
 /// Std-blocking HTTP client wrapping a single boxed `Read + Write +
 /// Send` stream.
 pub struct HttpClientStd {
-    stream: Box<dyn Stream>,
+    stream: Box<dyn HttpStream>,
 }
 
 impl HttpClientStd {
-    /// Builds a client around `stream`. The caller is responsible
-    /// for opening the connection (TCP, TLS handshake if needed).
+    /// Builds a client around `stream`. The caller is responsible for opening
+    /// the connection (TCP, TLS handshake if needed).
     pub fn new<S: Read + Write + Send + 'static>(stream: S) -> Self {
         Self {
             stream: Box::new(stream),
         }
     }
 
-    /// Connects to `url` and runs the TLS handshake when the scheme
-    /// is `https`. `http` URLs go through plain TCP. ALPN is read
-    /// from `tls.rustls.alpn` (see [`default_alpn`] for the
-    /// HTTP/1.1-conformant `["http/1.1"]`); an empty vec skips ALPN.
+    /// Connects to `url` and runs the TLS handshake when the scheme is
+    /// `https`. `http` URLs go through plain TCP. ALPN is read from
+    /// `tls.rustls.alpn` (see [`default_alpn`] for the HTTP/1.1-conformant
+    /// `["http/1.1"]`); an empty vec skips ALPN.
     #[cfg(any(
         feature = "rustls-aws",
         feature = "rustls-ring",
@@ -147,22 +140,21 @@ impl HttpClientStd {
         })
     }
 
-    /// Replaces the underlying stream — useful when the server
-    /// signals `Connection: close` or redirects to a different
-    /// authority and a fresh transport must be opened.
+    /// Replaces the underlying stream — useful when the server signals
+    /// `Connection: close` or redirects to a different authority and a fresh
+    /// transport must be opened.
     pub fn set_stream<S: Read + Write + Send + 'static>(&mut self, stream: S) {
         self.stream = Box::new(stream);
     }
 
-    /// Drives any standard-shape coroutine (`Yield = HttpYield`,
-    /// `Return = Result<Output, Error>`) against the wrapped stream
-    /// until it terminates.
+    /// Drives any standard-shape coroutine (`Yield = HttpYield`, `Return =
+    /// Result<Output, Error>`) against the wrapped stream until it terminates.
     ///
-    /// Coroutines that need richer Yield variants (e.g. [`Http11Send`]
-    /// with [`HttpSendYield::WantsRedirect`], or
-    /// [`Http11ReadChunksStream`] / [`SseFrameParser`] for streaming)
-    /// are driven by their own per-method loops on this client; see
-    /// [`Self::send`], [`Self::send_streaming`], and [`SseStream`].
+    /// Coroutines that need richer Yield variants (e.g. [`Http11Send`] with
+    /// [`HttpSendYield::WantsRedirect`], or [`Http11ReadChunksStream`] /
+    /// [`SseFrameParser`] for streaming) are driven by their own per-method
+    /// loops on this client; see [`Self::send`], [`Self::send_streaming`], and
+    /// [`SseStream`].
     pub fn run<C, T, E>(&mut self, mut coroutine: C) -> Result<T, HttpClientStdError>
     where
         C: HttpCoroutine<Yield = HttpYield, Return = Result<T, E>>,
@@ -187,10 +179,10 @@ impl HttpClientStd {
         }
     }
 
-    /// Runs [`Http11Send`] (RFC 9112): sends `request` over the
-    /// underlying stream and reads back the response. Returns
-    /// [`HttpClientStdError::UnexpectedRedirect`] on 3xx; the caller
-    /// can inspect the URL and retry against a new client.
+    /// Runs [`Http11Send`] (RFC 9112): sends `request` over the underlying
+    /// stream and reads back the response. Returns
+    /// [`HttpClientStdError::UnexpectedRedirect`] on 3xx; the caller can
+    /// inspect the URL and retry against a new client.
     pub fn send(&mut self, request: HttpRequest) -> Result<HttpSendOutput, HttpClientStdError> {
         let mut coroutine = Http11Send::new(request);
         let mut buf = [0u8; READ_BUFFER_SIZE];
@@ -221,8 +213,8 @@ impl HttpClientStd {
     }
 
     /// Runs [`Http10Send`] (RFC 1945): same as [`send`] but speaks
-    /// HTTP/1.0. Use this only when targeting a server that does not
-    /// support HTTP/1.1.
+    /// HTTP/1.0. Use this only when targeting a server that does not support
+    /// HTTP/1.1.
     ///
     /// [`send`]: HttpClientStd::send
     pub fn send_http10(
@@ -330,7 +322,7 @@ impl HttpClientStd {
 /// SSE frame parser, blocking on socket reads until the next event
 /// arrives or the connection closes.
 pub struct SseStream {
-    stream: Box<dyn Stream>,
+    stream: Box<dyn HttpStream>,
     chunk_stream: Http11ReadChunksStream,
     sse_parser: SseFrameParser,
     pending: Option<Vec<u8>>,
@@ -435,10 +427,10 @@ impl Iterator for SseStream {
     }
 }
 
-/// Marker for everything the client can run against; auto-implemented
-/// for any blocking `Read + Write + Send` impl. The `Send` supertrait
-/// flows the auto-trait through the `Box<dyn Stream>` type erasure so
-/// `HttpClientStd` can travel between threads. Every concrete stream
-/// the pimalaya stack hands in is already `Send`.
-trait Stream: Read + Write + Send {}
-impl<T: Read + Write + Send + ?Sized> Stream for T {}
+/// Marker for everything the client can run against; auto-implemented for any
+/// blocking `Read + Write + Send` impl. The `Send` supertrait flows the
+/// auto-trait through the `Box<dyn Stream>` type erasure so `HttpClientStd` can
+/// travel between threads. Every concrete stream the pimalaya stack hands in is
+/// already `Send`.
+trait HttpStream: Read + Write + Send {}
+impl<T: Read + Write + Send + ?Sized> HttpStream for T {}

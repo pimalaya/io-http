@@ -1,4 +1,6 @@
-//! HTTP response type (RFC 9110 §15).
+//! HTTP response type ([RFC 9110 §15]).
+//!
+//! [RFC 9110 §15]: https://www.rfc-editor.org/rfc/rfc9110#section-15
 
 use core::{fmt, str};
 

@@ -1,8 +1,8 @@
-//! HTTP Basic authentication scheme.
+//! HTTP Basic authentication scheme: credentials are sent as a
+//! base64-encoded `username:password` pair in the `Authorization`
+//! request header ([RFC 7617 §2]).
 //!
-//! The Basic scheme transmits credentials as a base64-encoded
-//! `username:password` pair in the `Authorization` request header
-//! (RFC 7617 §2).
+//! [RFC 7617 §2]: https://www.rfc-editor.org/rfc/rfc7617#section-2
 
 use core::{fmt, str::from_utf8};
 
@@ -15,16 +15,16 @@ use base64::{DecodeError, prelude::BASE64_STANDARD, prelude::Engine as _};
 use secrecy::{ExposeSecret, SecretString};
 use thiserror::Error;
 
-/// Errors that can occur when parsing a `Basic` authorization value.
+/// Failure causes when parsing a `Basic` authorization value.
 #[derive(Debug, Error)]
 pub enum BasicError {
-    #[error("Missing 'Basic ' prefix in Authorization value")]
+    #[error("Missing `Basic ` prefix in Authorization value")]
     MissingPrefix,
     #[error("Invalid base64 in Authorization value: {0}")]
     InvalidBase64(DecodeError),
     #[error("Decoded credentials are not valid UTF-8")]
     InvalidUtf8,
-    #[error("Decoded credentials are missing the ':' separator")]
+    #[error("Decoded credentials are missing the `:` separator")]
     MissingColon,
 }
 

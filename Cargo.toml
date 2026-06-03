@@ -2,7 +2,7 @@
 name = "io-http"
 description = "HTTP/1.X client library"
 version = "0.0.3"
-authors = ["Clément DOUIN <pimalaya.org@posteo.net>"]
+authors = ["soywod <pimalaya.org@posteo.net>"]
 rust-version = "1.87"
 edition = "2024"
 license = "MIT OR Apache-2.0"
@@ -17,7 +17,7 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["client"]
+default = ["rustls-ring"]
 client = []
 rustls-ring = ["client", "pimalaya-stream/rustls-ring", "dep:anyhow", "dep:pimalaya-stream"]
 rustls-aws = ["client", "pimalaya-stream/rustls-aws", "dep:anyhow", "dep:pimalaya-stream"]
@@ -43,8 +43,9 @@ secrecy = { version = "0.10", default-features = false }
 thiserror = { version = "2", default-features = false }
 url = { version = "2.5", default-features = false }
 
-# [patch.crates-io]
+[patch.crates-io]
+# local
 # pimalaya-stream.path = "../stream"
 
-[patch.crates-io]
-pimalaya-stream.git = "https://github.com/pimalaya/stream"
+# git
+# pimalaya-stream.git = "https://github.com/pimalaya/stream"

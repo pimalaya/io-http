@@ -1,27 +1,73 @@
-//! I/O-free coroutine to send an HTTP request and receive its
-//! response (RFC 9112).
+//! I/O-free coroutine sending an HTTP/1.1 request and receiving its
+//! response ([RFC 9112]).
 //!
-//! The coroutine serializes the request, writes it to the socket,
-//! then reads and parses the response headers (delegated to
-//! [`Http11ReadHeaders`]) and body. Three body-reading strategies are
-//! supported, selected automatically from the response headers:
+//! Serialises the request, drives the read/parse cycle through
+//! [`Http11ReadHeaders`] for the head and selects a body-reading
+//! strategy from the response headers:
 //!
 //! | Strategy     | Trigger                      |
 //! |--------------|------------------------------|
 //! | Chunked      | `Transfer-Encoding: chunked` |
 //! | Fixed-length | `Content-Length: <n>`        |
 //! | Read-to-EOF  | Neither header present       |
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use std::{io::{Read, Write}, net::TcpStream};
+//!
+//! use io_http::{
+//!     coroutine::*,
+//!     rfc9110::{request::HttpRequest, send::HttpSendYield},
+//!     rfc9112::send::Http11Send,
+//! };
+//! use url::Url;
+//!
+//! let url = Url::parse("http://example.com/").unwrap();
+//! let request = HttpRequest::get(url.clone())
+//!     .header("Host", url.host_str().unwrap())
+//!     .header("Connection", "close");
+//!
+//! let mut stream = TcpStream::connect("example.com:80").unwrap();
+//! let mut send = Http11Send::new(request);
+//! let mut arg: Option<&[u8]> = None;
+//! let mut buf = [0u8; 4096];
+//!
+//! let (response, keep_alive) = loop {
+//!     match send.resume(arg.take()) {
+//!         HttpCoroutineState::Complete(Ok(out)) => break (out.response, out.keep_alive),
+//!         HttpCoroutineState::Complete(Err(err)) => panic!("{err}"),
+//!         HttpCoroutineState::Yielded(HttpSendYield::WantsRead) => {
+//!             let n = stream.read(&mut buf).unwrap();
+//!             arg = Some(&buf[..n]);
+//!         }
+//!         HttpCoroutineState::Yielded(HttpSendYield::WantsWrite(bytes)) => {
+//!             stream.write_all(&bytes).unwrap();
+//!         }
+//!         HttpCoroutineState::Yielded(HttpSendYield::WantsRedirect { url, .. }) => {
+//!             panic!("redirect to {url}");
+//!         }
+//!     }
+//! };
+//!
+//! println!("{}", *response.status);
+//! # let _ = keep_alive;
+//! ```
+//!
+//! [RFC 9112]: https://www.rfc-editor.org/rfc/rfc9112
 
-use core::mem;
+use core::{fmt, mem};
 
 use alloc::{borrow::ToOwned, string::String, vec::Vec};
 
+use httparse::Error as HttparseError;
 use log::trace;
 use thiserror::Error;
 use url::Url;
 
 use crate::{
     coroutine::*,
+    http_try,
     rfc1945::version::HTTP_10,
     rfc9110::{
         headers::{CONTENT_LENGTH, LOCATION, TRANSFER_ENCODING},
@@ -35,16 +81,16 @@ use crate::{
     },
 };
 
-/// Errors that can occur during the coroutine progression.
+/// Failure causes during the HTTP/1.1 send flow.
 #[derive(Debug, Error)]
 pub enum Http11SendError {
-    #[error("Reached unexpected EOF")]
+    #[error("HTTP/1.1 send failed: reached unexpected EOF")]
     Eof,
-    #[error("Parse HTTP response headers error: {0}")]
-    ParseResponseHeaders(httparse::Error),
-    #[error("Parse HTTP/1.1 response error: invalid content length `{0}`")]
+    #[error("HTTP/1.1 send failed: parse response headers: {0}")]
+    ParseResponseHeaders(HttparseError),
+    #[error("HTTP/1.1 send failed: invalid content length `{0}`")]
     InvalidContentLength(String),
-    #[error(transparent)]
+    #[error("HTTP/1.1 send failed: {0}")]
     ReadChunks(#[from] Http11ReadChunksError),
 }
 
@@ -57,70 +103,26 @@ impl From<Http11ReadHeadersError> for Http11SendError {
     }
 }
 
-/// Internal state of the [`Http11Send`] coroutine.
 #[derive(Debug)]
 enum State {
-    /// Reading and parsing the response head.
     ReadHeaders(Http11ReadHeaders),
-    /// Accumulating a chunked-transfer body.
     BodyChunks(Http11ReadChunks),
-    /// Accumulating a fixed-length body of `len` bytes.
     BodyLength(usize),
-    /// Accumulating body bytes until EOF.
     BodyEof,
 }
 
+impl fmt::Display for State {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ReadHeaders(_) => f.write_str("read headers"),
+            Self::BodyChunks(_) => f.write_str("read body chunks"),
+            Self::BodyLength(_) => f.write_str("read body length"),
+            Self::BodyEof => f.write_str("read body until eof"),
+        }
+    }
+}
+
 /// I/O-free coroutine to send an HTTP/1.1 request and receive its response.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use std::{io::{Read, Write}, net::TcpStream};
-/// use io_http::{
-///     coroutine::*,
-///     rfc9110::{request::HttpRequest, send::HttpSendYield},
-///     rfc9112::send::Http11Send,
-/// };
-/// use url::Url;
-///
-/// let url = Url::parse("http://example.com/").unwrap();
-/// let request = HttpRequest::get(url.clone())
-///     .header("Host", url.host_str().unwrap())
-///     .header("Connection", "close");
-///
-/// let mut stream = TcpStream::connect("example.com:80").unwrap();
-/// let mut send = Http11Send::new(request);
-/// let mut arg: Option<&[u8]> = None;
-/// let mut buf = [0u8; 4096];
-///
-/// let (response, keep_alive) = loop {
-///     match send.resume(arg.take()) {
-///         HttpCoroutineState::Complete(Ok(out)) => break (out.response, out.keep_alive),
-///         HttpCoroutineState::Complete(Err(err)) => panic!("{err}"),
-///         HttpCoroutineState::Yielded(HttpSendYield::WantsRead) => {
-///             let n = stream.read(&mut buf).unwrap();
-///             arg = Some(&buf[..n]);
-///         }
-///         HttpCoroutineState::Yielded(HttpSendYield::WantsWrite(bytes)) => {
-///             stream.write_all(&bytes).unwrap();
-///         }
-///         HttpCoroutineState::Yielded(HttpSendYield::WantsRedirect {
-///             url: new_url,
-///             keep_alive,
-///             same_origin,
-///             ..
-///         }) => {
-///             if !keep_alive || !same_origin {
-///                 stream = TcpStream::connect(new_url.host_str().unwrap()).unwrap();
-///             }
-///             send = Http11Send::new(HttpRequest::get(new_url));
-///             arg = None;
-///         }
-///     }
-/// };
-///
-/// println!("{}", *response.status);
-/// ```
 #[derive(Debug)]
 pub struct Http11Send {
     request_url: Url,
@@ -150,10 +152,6 @@ impl Http11Send {
         }
     }
 
-    /// Builds the terminal state for the given response, emitting
-    /// [`HttpSendYield::WantsRedirect`] when the status is 3xx and the
-    /// `Location` header resolves to a valid URL, otherwise
-    /// `Complete(Ok(HttpSendOutput { … }))`.
     fn finish(
         &self,
         response: HttpResponse,
@@ -193,6 +191,8 @@ impl HttpCoroutine for Http11Send {
 
     fn resume(&mut self, mut arg: Option<&[u8]>) -> HttpCoroutineState<Self::Yield, Self::Return> {
         loop {
+            trace!("http/1.1 send: {}", self.state);
+
             if let Some(bytes) = self.wants_write.take() {
                 return HttpCoroutineState::Yielded(HttpSendYield::WantsWrite(bytes));
             }
@@ -214,21 +214,16 @@ impl HttpCoroutine for Http11Send {
                         self.is_conn_closed = !out.keep_alive;
                         let status = *response.status;
 
-                        // 204 / 304: no body.
                         if status == 204 || status == 304 {
                             return self.finish(response, out.remaining);
                         }
 
-                        // chunked transfer coding is HTTP/1.1 only.
                         if !is_http10 {
                             let chunked = response
                                 .header(TRANSFER_ENCODING)
                                 .is_some_and(|enc| enc.eq_ignore_ascii_case("chunked"));
                             if chunked {
                                 let mut chunks = Http11ReadChunks::default();
-                                // Feed any pre-read body bytes immediately so the
-                                // sub-coroutine can short-circuit if the whole body
-                                // is already buffered.
                                 match chunks.resume(Some(&out.remaining)) {
                                     HttpCoroutineState::Complete(Ok(chunk_out)) => {
                                         response.body = chunk_out.body;
@@ -253,7 +248,7 @@ impl HttpCoroutine for Http11Send {
 
                         if let Some(len_str) = response.header(CONTENT_LENGTH) {
                             let len_str = len_str.trim();
-                            let Ok(len) = usize::from_str_radix(len_str, 10) else {
+                            let Ok(len) = len_str.parse::<usize>() else {
                                 let err = Http11SendError::InvalidContentLength(len_str.to_owned());
                                 return HttpCoroutineState::Complete(Err(err));
                             };
@@ -268,22 +263,12 @@ impl HttpCoroutine for Http11Send {
                         self.state = State::BodyEof;
                     }
                 },
-                State::BodyChunks(chunks) => match chunks.resume(arg.take()) {
-                    HttpCoroutineState::Complete(Ok(chunk_out)) => {
-                        let mut response = self.response.take().expect("response missing");
-                        response.body = chunk_out.body;
-                        return self.finish(response, chunk_out.remaining);
-                    }
-                    HttpCoroutineState::Yielded(HttpYield::WantsRead) => {
-                        return HttpCoroutineState::Yielded(HttpSendYield::WantsRead);
-                    }
-                    HttpCoroutineState::Yielded(HttpYield::WantsWrite(_)) => {
-                        unreachable!("Http11ReadChunks never writes");
-                    }
-                    HttpCoroutineState::Complete(Err(err)) => {
-                        return HttpCoroutineState::Complete(Err(err.into()));
-                    }
-                },
+                State::BodyChunks(chunks) => {
+                    let chunk_out = http_try!(chunks, arg.take());
+                    let mut response = self.response.take().expect("response missing");
+                    response.body = chunk_out.body;
+                    return self.finish(response, chunk_out.remaining);
+                }
                 State::BodyLength(len) => {
                     if let Some(data) = arg.take() {
                         self.buf.extend_from_slice(data);
@@ -322,107 +307,124 @@ impl HttpCoroutine for Http11Send {
 
 #[cfg(test)]
 mod tests {
-    use crate::rfc9112::send::*;
+    use super::*;
 
     #[test]
-    fn body_chunks() {
+    fn body_chunks_completes() {
         let req = HttpRequest::get("https://example.com".try_into().unwrap());
         let mut coroutine = Http11Send::new(req);
-        let mut buf: Option<&[u8]> = None;
 
-        loop {
-            match coroutine.resume(buf) {
-                HttpCoroutineState::Complete(Ok(out)) => {
-                    assert_eq!("HTTP/1.1", out.response.version);
-                    assert_eq!(200, *out.response.status);
-                    assert_eq!(b"hello world", &*out.response.body);
-                    assert_eq!(0, out.remaining.len());
-                    assert_eq!(true, out.keep_alive);
-                    break;
-                }
-                HttpCoroutineState::Yielded(HttpSendYield::WantsWrite(bytes)) => {
-                    assert_eq!(bytes, b"GET / HTTP/1.1\r\ncontent-length: 0\r\n\r\n");
-                    buf = None;
-                }
-                HttpCoroutineState::Yielded(HttpSendYield::WantsRead) => {
-                    buf = Some(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n");
-                }
-                HttpCoroutineState::Yielded(HttpSendYield::WantsRedirect { .. }) => {
-                    unreachable!("wants redirect");
-                }
-                HttpCoroutineState::Complete(Err(err)) => unreachable!("{err}"),
-            }
-        }
+        let bytes = expect_wants_write(&mut coroutine, None);
+        assert_eq!(bytes, b"GET / HTTP/1.1\r\ncontent-length: 0\r\n\r\n");
+
+        expect_wants_read(&mut coroutine, None);
+
+        let reply = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+        let out = expect_complete_ok(&mut coroutine, Some(reply));
+        assert_eq!(out.response.version, "HTTP/1.1");
+        assert_eq!(*out.response.status, 200);
+        assert_eq!(out.response.body, b"hello world");
+        assert!(out.remaining.is_empty());
+        assert!(out.keep_alive);
     }
 
     #[test]
-    fn body_length() {
+    fn body_length_completes() {
         let req = HttpRequest::get("https://example.com".try_into().unwrap());
         let mut coroutine = Http11Send::new(req);
-        let mut buf: Option<&[u8]> = None;
 
-        loop {
-            match coroutine.resume(buf) {
-                HttpCoroutineState::Complete(Ok(out)) => {
-                    assert_eq!("HTTP/1.1", out.response.version);
-                    assert_eq!(200, *out.response.status);
-                    assert_eq!(b"hello", &*out.response.body);
-                    assert_eq!(0, out.remaining.len());
-                    assert_eq!(true, out.keep_alive);
-                    break;
-                }
-                HttpCoroutineState::Yielded(HttpSendYield::WantsWrite(bytes)) => {
-                    assert_eq!(bytes, b"GET / HTTP/1.1\r\ncontent-length: 0\r\n\r\n");
-                    buf = None;
-                }
-                HttpCoroutineState::Yielded(HttpSendYield::WantsRead) => {
-                    buf = Some(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello");
-                }
-                HttpCoroutineState::Yielded(HttpSendYield::WantsRedirect { .. }) => {
-                    unreachable!("wants redirect");
-                }
-                HttpCoroutineState::Complete(Err(err)) => unreachable!("{err}"),
-            }
-        }
+        expect_wants_write(&mut coroutine, None);
+        expect_wants_read(&mut coroutine, None);
+
+        let reply = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+        let out = expect_complete_ok(&mut coroutine, Some(reply));
+        assert_eq!(*out.response.status, 200);
+        assert_eq!(out.response.body, b"hello");
+        assert!(out.keep_alive);
     }
 
     #[test]
-    fn body_eof() {
+    fn body_eof_completes() {
         let req = HttpRequest::get("https://example.com".try_into().unwrap());
         let mut coroutine = Http11Send::new(req);
-        let mut buf: Option<&[u8]> = None;
-        let mut count = 0;
 
-        loop {
-            match coroutine.resume(buf) {
-                HttpCoroutineState::Complete(Ok(out)) => {
-                    assert_eq!("HTTP/1.1", out.response.version);
-                    assert_eq!(200, *out.response.status);
-                    assert_eq!(b"hello world", &*out.response.body);
-                    assert_eq!(0, out.remaining.len());
-                    assert_eq!(true, out.keep_alive);
-                    break;
-                }
-                HttpCoroutineState::Yielded(HttpSendYield::WantsWrite(bytes)) => {
-                    assert_eq!(bytes, b"GET / HTTP/1.1\r\ncontent-length: 0\r\n\r\n");
-                    buf = None;
-                }
-                HttpCoroutineState::Yielded(HttpSendYield::WantsRead) if count == 0 => {
-                    count = 1;
-                    buf = Some(b"HTTP/1.1 200 OK\r\n\r\nhello ");
-                }
-                HttpCoroutineState::Yielded(HttpSendYield::WantsRead) if count == 1 => {
-                    count = 2;
-                    buf = Some(b"world");
-                }
-                HttpCoroutineState::Yielded(HttpSendYield::WantsRead) => {
-                    buf = Some(b"");
-                }
-                HttpCoroutineState::Yielded(HttpSendYield::WantsRedirect { .. }) => {
-                    unreachable!("wants redirect");
-                }
-                HttpCoroutineState::Complete(Err(err)) => unreachable!("{err}"),
+        expect_wants_write(&mut coroutine, None);
+        expect_wants_read(&mut coroutine, None);
+        expect_wants_read(&mut coroutine, Some(b"HTTP/1.1 200 OK\r\n\r\nhello "));
+        expect_wants_read(&mut coroutine, Some(b"world"));
+
+        let out = expect_complete_ok(&mut coroutine, Some(b""));
+        assert_eq!(out.response.body, b"hello world");
+    }
+
+    #[test]
+    fn invalid_content_length_errors() {
+        let req = HttpRequest::get("https://example.com".try_into().unwrap());
+        let mut coroutine = Http11Send::new(req);
+
+        expect_wants_write(&mut coroutine, None);
+        expect_wants_read(&mut coroutine, None);
+
+        let reply = b"HTTP/1.1 200 OK\r\nContent-Length: notanumber\r\n\r\n";
+        let err = expect_complete_err(&mut coroutine, Some(reply));
+        let Http11SendError::InvalidContentLength(s) = err else {
+            panic!("expected InvalidContentLength, got {err:?}");
+        };
+        assert_eq!(s, "notanumber");
+    }
+
+    #[test]
+    fn redirect_yields_wants_redirect() {
+        let req = HttpRequest::get("http://example.com/old".try_into().unwrap());
+        let mut coroutine = Http11Send::new(req);
+
+        expect_wants_write(&mut coroutine, None);
+        expect_wants_read(&mut coroutine, None);
+
+        let reply =
+            b"HTTP/1.1 301 Moved Permanently\r\nLocation: /new\r\nContent-Length: 0\r\n\r\n";
+        match coroutine.resume(Some(reply)) {
+            HttpCoroutineState::Yielded(HttpSendYield::WantsRedirect {
+                url,
+                same_origin,
+                keep_alive,
+                ..
+            }) => {
+                assert_eq!(url.path(), "/new");
+                assert!(same_origin);
+                assert!(keep_alive);
             }
+            state => panic!("expected WantsRedirect, got {state:?}"),
+        }
+    }
+
+    // --- utils
+
+    fn expect_wants_write(cor: &mut Http11Send, arg: Option<&[u8]>) -> Vec<u8> {
+        match cor.resume(arg) {
+            HttpCoroutineState::Yielded(HttpSendYield::WantsWrite(bytes)) => bytes,
+            state => panic!("expected WantsWrite, got {state:?}"),
+        }
+    }
+
+    fn expect_wants_read(cor: &mut Http11Send, arg: Option<&[u8]>) {
+        match cor.resume(arg) {
+            HttpCoroutineState::Yielded(HttpSendYield::WantsRead) => {}
+            state => panic!("expected WantsRead, got {state:?}"),
+        }
+    }
+
+    fn expect_complete_ok(cor: &mut Http11Send, arg: Option<&[u8]>) -> HttpSendOutput {
+        match cor.resume(arg) {
+            HttpCoroutineState::Complete(Ok(out)) => out,
+            state => panic!("expected Complete(Ok), got {state:?}"),
+        }
+    }
+
+    fn expect_complete_err(cor: &mut Http11Send, arg: Option<&[u8]>) -> Http11SendError {
+        match cor.resume(arg) {
+            HttpCoroutineState::Complete(Err(err)) => err,
+            state => panic!("expected Complete(Err), got {state:?}"),
         }
     }
 }

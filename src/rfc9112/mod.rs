@@ -1,11 +1,10 @@
-//! HTTP/1.1 message syntax (RFC 9112).
+//! HTTP/1.1 message syntax ([RFC 9112]).
 //!
-//! This module implements the HTTP/1.1 wire protocol as I/O-free
-//! coroutines. No sockets, no async runtime, and no `std` are
-//! required.
+//! I/O-free coroutines implementing the HTTP/1.1 wire protocol: no sockets, no
+//! async runtime, no `std`. Shared types (status codes, headers, request,
+//! response) live in [`crate::rfc9110`].
 //!
-//! Shared types (status codes, headers, request, response) live in
-//! [`crate::rfc9110`].
+//! [RFC 9112]: https://www.rfc-editor.org/rfc/rfc9112
 
 pub mod chunk;
 pub mod chunk_stream;

@@ -13,7 +13,7 @@ This library is composed of 3 feature-gated layers:
 - [Features](#features)
 - [RFC coverage](#rfc-coverage)
 - [Usage](#usage)
-  - [I/O-free coroutines](#io-free-coroutines)
+  - [Coroutine](#coroutine)
   - [Light client](#light-client)
   - [Full client](#full-client)
 - [Examples](#examples)
@@ -66,13 +66,13 @@ Whichever mode you pick, every coroutine implements the `HttpCoroutine` trait. I
 - `Yielded(Y)`: intermediate. `Y` is the per-coroutine yield type (e.g. `HttpYield::WantsRead` / `HttpYield::WantsWrite(Vec<u8>)` for most coroutines; `HttpSendYield::WantsRedirect { … }` for `Http*Send`; `SseFrameParserYield::Frame(SseFrame)` for the SSE parser).
 - `Complete(R)`: terminal. By convention `R = Result<Output, Error>` carrying the operation's final value.
 
-### I/O-free coroutines
+### Coroutine
 
 No features required: works in `#![no_std]`, no sockets, no async runtime. You own the loop and the bytes; the library only produces request bytes and consumes server responses.
 
 Send an HTTP/1.1 request against an async Tokio + rustls stack (the same shape works under blocking, fuzzing, or in-memory replay):
 
-```rust,ignore
+```rust,no_run
 use std::sync::Arc;
 
 use io_http::{
@@ -139,7 +139,8 @@ Enable the `client` feature. `HttpClientStd::new(stream)` wraps any blocking `Re
 io-http = { version = "0.0.3", default-features = false, features = ["client"] }
 ```
 
-```rust,ignore
+```rust,no_run
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
 use std::{net::TcpStream, sync::Arc};
 
 use io_http::{client::HttpClientStd, rfc9110::request::HttpRequest};
@@ -158,12 +159,14 @@ let stream = StreamOwned::new(conn, tcp);
 
 let mut client = HttpClientStd::new(stream);
 
-let request = HttpRequest::get(url)
+let request = HttpRequest::get(url.clone())
     .header("Host", domain)
     .header("Connection", "close");
 
 let output = client.send(request)?;
 println!("{} {}", output.response.version, *output.response.status);
+# Ok(())
+# }
 ```
 
 ### Full client
@@ -175,7 +178,8 @@ Enable one of the TLS feature flags: `rustls-ring` (default), `rustls-aws`, or `
 io-http = "0.0.3" # rustls-ring is enabled by default
 ```
 
-```rust,ignore
+```rust,no_run
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
 use io_http::{client::HttpClientStd, rfc9110::request::HttpRequest};
 use pimalaya_stream::tls::Tls;
 use url::Url;
@@ -190,6 +194,8 @@ let request = HttpRequest::get(url.clone())
 
 let output = client.send(request)?;
 println!("{} {}", output.response.version, *output.response.status);
+# Ok(())
+# }
 ```
 
 ## Examples
@@ -215,13 +221,9 @@ This project is developed with AI assistance. This section documents how, so use
 
 - **Not used for**: Engineering, critical code, git manipulation (commit, merge, rebase…), real-world tests.
 
-- **Verification**: Every AI-assisted change is read, compiled, tested, and formatted before commit (`nix develop --command cargo check / cargo test / cargo
-fmt`). Behavioural correctness is verified against the relevant RFC or upstream spec, not assumed from the model output. Tests are never adjusted to fit
-AI-generated code; the code is adjusted to fit correct behaviour.
+- **Verification**: Every AI-assisted change is read, compiled, tested, and formatted before commit (`nix develop --command cargo check / cargo test / cargo fmt`). Behavioural correctness is verified against the relevant RFC or upstream spec, not assumed from the model output. Tests are never adjusted to fit AI-generated code; the code is adjusted to fit correct behaviour.
 
-- **Limitations**: AI models occasionally produce code that compiles and passes tests but is subtly wrong: off-by-one errors, missed edge cases, plausible
-but nonexistent APIs, stale RFC references. The verification workflow catches most of this; it does not catch all of it. Bug reports are welcome and taken
-seriously.
+- **Limitations**: AI models occasionally produce code that compiles and passes tests but is subtly wrong: off-by-one errors, missed edge cases, plausible but nonexistent APIs, stale RFC references. The verification workflow catches most of this; it does not catch all of it. Bug reports are welcome and taken seriously.
 
 - **Last reviewed**: 30/05/2026
 

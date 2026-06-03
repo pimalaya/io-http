@@ -1,3 +1,7 @@
+//! HTTP/1.1 request serialisation onto the wire ([RFC 9112 §3]).
+//!
+//! [RFC 9112 §3]: https://www.rfc-editor.org/rfc/rfc9112#section-3
+
 use alloc::{format, vec::Vec};
 
 use crate::{
@@ -10,6 +14,8 @@ use crate::{
 };
 
 impl HttpRequest {
+    /// Serialises this request as an HTTP/1.1 message; `Content-Length`
+    /// is regenerated from the body and any existing copy is dropped.
     pub fn to_http_11_vec(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
 
@@ -27,8 +33,6 @@ impl HttpRequest {
         bytes.extend(CRLF);
 
         for (key, val) in &self.headers {
-            // skip content-length, as it is automatically
-            // generated below
             if key.eq_ignore_ascii_case(CONTENT_LENGTH) {
                 continue;
             }
