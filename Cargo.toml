@@ -1,7 +1,7 @@
 [package]
 name = "io-http"
 description = "HTTP/1.X client library"
-version = "0.0.3"
+version = "0.1.0"
 authors = ["soywod <pimalaya.org@posteo.net>"]
 rust-version = "1.87"
 edition = "2024"
@@ -57,11 +57,5 @@ thiserror = { version = "2", default-features = false }
 url = { version = "2.5", default-features = false }
 
 [patch.crates-io]
-#
-# local
-#
 # pimalaya-stream.path = "../stream"
-#
-# git
-#
 # pimalaya-stream.git = "https://github.com/pimalaya/stream"

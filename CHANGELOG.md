@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-06-03
+
 ### Added
 
 - Added the `HttpCoroutine` trait mirroring `core::ops::Coroutine`.
@@ -81,6 +83,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Replaced every per-coroutine `*Result` enum with `HttpCoroutineState<Y, R>`; per-coroutine `Output` structs (`HttpSendOutput`, `Http11ReadChunksOutput`, `Http11ReadHeadersOutput`, `WellKnownOutput`) hold the previous `Ok { … }` fields. Shared `HttpSendOutput` and `HttpSendYield` moved to `rfc9110::send`, reused by both `Http10Send` and `Http11Send`.
 
+- Each per-coroutine private `State` enum now implements `fmt::Display`; resume bodies emit a single `trace!("<proto> <verb>: {state}")` per iteration in place of the previous scattered per-branch traces.
+
+- Tightened inline documentation across all modules: concise module headers with markdown RFC footnote links, one-line `///` per public type, struct-level coroutine examples moved up to module headers.
+
 ## [0.0.3] - 2025-10-24
 
 ### Added
@@ -108,7 +114,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Init HTTP 1.1 module with send coroutine
 
-[unreleased]: https://github.com/pimalaya/io-http/compare/v0.0.3..HEAD
+[unreleased]: https://github.com/pimalaya/io-http/compare/v0.1.0..HEAD
+[0.1.0]: https://github.com/pimalaya/io-http/compare/v0.0.3..v0.1.0
 [0.0.3]: https://github.com/pimalaya/io-http/compare/v0.0.2..v0.0.3
 [0.0.2]: https://github.com/pimalaya/io-http/compare/v0.0.1..v0.0.2
 [0.0.1]: https://github.com/pimalaya/io-http/compare/root..v0.0.1
