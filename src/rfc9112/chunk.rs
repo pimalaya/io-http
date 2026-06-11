@@ -68,7 +68,7 @@ impl HttpCoroutine for Http11ReadChunks {
         }
 
         loop {
-            trace!("http/1.1 read chunks: {}", self.state);
+            trace!("{}", self.state);
 
             if self.wants_read {
                 self.wants_read = false;

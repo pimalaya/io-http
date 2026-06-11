@@ -106,7 +106,7 @@ impl Http10Send {
     /// Creates a new coroutine that will send the given request and
     /// receive its response.
     pub fn new(req: HttpRequest) -> Self {
-        trace!("prepares HTTP/1.0 request to be sent: {req:?}");
+        trace!("prepare request to be sent: {req:?}");
 
         let request_url = req.url.clone();
         let bytes = req.to_http_10_vec();
@@ -160,7 +160,7 @@ impl HttpCoroutine for Http10Send {
 
     fn resume(&mut self, mut arg: Option<&[u8]>) -> HttpCoroutineState<Self::Yield, Self::Return> {
         loop {
-            trace!("http/1.0 send: {}", self.state);
+            trace!("{}", self.state);
 
             if let Some(bytes) = self.wants_write.take() {
                 return HttpCoroutineState::Yielded(HttpSendYield::WantsWrite(bytes));
