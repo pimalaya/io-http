@@ -5,13 +5,13 @@
 //! # Example
 //!
 //! ```rust
-//! use io_http::rfc7617::basic::BasicCredentials;
+//! use io_http::rfc7617::basic::HttpAuthBasic;
 //! use secrecy::ExposeSecret;
 //!
-//! let creds = BasicCredentials::new("Aladdin", "open sesame");
+//! let creds = HttpAuthBasic::new("Aladdin", "open sesame");
 //! assert_eq!(creds.to_authorization(), "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==");
 //!
-//! let parsed = BasicCredentials::from_authorization("Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==").unwrap();
+//! let parsed = HttpAuthBasic::from_authorization("Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==").unwrap();
 //! assert_eq!(parsed.username, "Aladdin");
 //! assert_eq!(parsed.password.expose_secret(), "open sesame");
 //! ```
@@ -45,12 +45,12 @@ pub enum BasicError {
 /// HTTP `Basic` credential pair; `password` is redacted in
 /// [`fmt::Debug`] and zeroed on drop.
 #[derive(Clone)]
-pub struct BasicCredentials {
+pub struct HttpAuthBasic {
     pub username: String,
     pub password: SecretString,
 }
 
-impl BasicCredentials {
+impl HttpAuthBasic {
     /// Wraps a username + password.
     pub fn new(username: impl Into<String>, password: impl Into<String>) -> Self {
         Self {
@@ -86,23 +86,23 @@ impl BasicCredentials {
     }
 }
 
-impl fmt::Debug for BasicCredentials {
+impl fmt::Debug for HttpAuthBasic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("BasicCredentials")
+        f.debug_struct("HttpAuthBasic")
             .field("username", &self.username)
             .field("password", &"[REDACTED]")
             .finish()
     }
 }
 
-impl PartialEq for BasicCredentials {
+impl PartialEq for HttpAuthBasic {
     fn eq(&self, other: &Self) -> bool {
         self.username == other.username
             && self.password.expose_secret() == other.password.expose_secret()
     }
 }
 
-impl Eq for BasicCredentials {}
+impl Eq for HttpAuthBasic {}
 
 #[cfg(test)]
 mod tests {
@@ -114,7 +114,7 @@ mod tests {
 
     #[test]
     fn to_authorization_rfc_test_vector() {
-        let creds = BasicCredentials::new("Aladdin", "open sesame");
+        let creds = HttpAuthBasic::new("Aladdin", "open sesame");
         assert_eq!(
             creds.to_authorization(),
             "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ=="
@@ -123,31 +123,31 @@ mod tests {
 
     #[test]
     fn to_authorization_has_basic_prefix() {
-        let creds = BasicCredentials::new("user", "pass");
+        let creds = HttpAuthBasic::new("user", "pass");
         assert!(creds.to_authorization().starts_with("Basic "));
     }
 
     #[test]
     fn to_authorization_empty_password() {
-        let creds = BasicCredentials::new("user", "");
+        let creds = HttpAuthBasic::new("user", "");
         let value = creds.to_authorization();
-        let decoded = BasicCredentials::from_authorization(&value).unwrap();
+        let decoded = HttpAuthBasic::from_authorization(&value).unwrap();
         assert_eq!(decoded.username, "user");
         assert_eq!(decoded.password.expose_secret(), "");
     }
 
     #[test]
     fn from_authorization_roundtrip() {
-        let original = BasicCredentials::new("user@example.com", "p@$$w0rd!");
+        let original = HttpAuthBasic::new("user@example.com", "p@$$w0rd!");
         let header = original.to_authorization();
-        let parsed = BasicCredentials::from_authorization(&header).unwrap();
+        let parsed = HttpAuthBasic::from_authorization(&header).unwrap();
         assert_eq!(parsed, original);
     }
 
     #[test]
     fn from_authorization_colon_in_password() {
-        let original = BasicCredentials::new("user", "pa:ss:word");
-        let parsed = BasicCredentials::from_authorization(&original.to_authorization()).unwrap();
+        let original = HttpAuthBasic::new("user", "pa:ss:word");
+        let parsed = HttpAuthBasic::from_authorization(&original.to_authorization()).unwrap();
         assert_eq!(parsed.username, "user");
         assert_eq!(parsed.password.expose_secret(), "pa:ss:word");
     }
@@ -155,7 +155,7 @@ mod tests {
     #[test]
     fn from_authorization_missing_prefix() {
         assert!(matches!(
-            BasicCredentials::from_authorization("Bearer token"),
+            HttpAuthBasic::from_authorization("Bearer token"),
             Err(BasicError::MissingPrefix)
         ));
     }
@@ -163,7 +163,7 @@ mod tests {
     #[test]
     fn from_authorization_invalid_base64() {
         assert!(matches!(
-            BasicCredentials::from_authorization("Basic !!!not-b64!!!"),
+            HttpAuthBasic::from_authorization("Basic !!!not-b64!!!"),
             Err(BasicError::InvalidBase64(_))
         ));
     }
@@ -172,14 +172,14 @@ mod tests {
     fn from_authorization_missing_colon() {
         // base64("nocolon") = "bm9jb2xvbg=="
         assert!(matches!(
-            BasicCredentials::from_authorization("Basic bm9jb2xvbg=="),
+            HttpAuthBasic::from_authorization("Basic bm9jb2xvbg=="),
             Err(BasicError::MissingColon)
         ));
     }
 
     #[test]
     fn debug_redacts_password() {
-        let creds = BasicCredentials::new("alice", "hunter2");
+        let creds = HttpAuthBasic::new("alice", "hunter2");
         let debug = format!("{creds:?}");
         assert!(
             !debug.contains("hunter2"),

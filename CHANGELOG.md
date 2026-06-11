@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Renamed `BasicCredentials` to `HttpAuthBasic` and `BearerToken` to `HttpAuthBearer`.
+
+  The credential types now carry the crate's `Http*` prefix so they read clearly when wrapped by higher-level crates (e.g. io-webdav's `WebdavAuth::Basic(HttpAuthBasic)`). The module paths (`rfc7617::basic`, `rfc6750::bearer`) and the `new` / `to_authorization` / `from_authorization` API are unchanged.
+
 ## [0.1.1] - 2026-06-03
 
 ### Fixed

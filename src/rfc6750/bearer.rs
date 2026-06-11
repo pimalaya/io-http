@@ -4,13 +4,13 @@
 //! # Example
 //!
 //! ```rust
-//! use io_http::rfc6750::bearer::BearerToken;
+//! use io_http::rfc6750::bearer::HttpAuthBearer;
 //! use secrecy::ExposeSecret;
 //!
-//! let token = BearerToken::new("mF_9.B5f-4.1JqM");
+//! let token = HttpAuthBearer::new("mF_9.B5f-4.1JqM");
 //! assert_eq!(token.to_authorization(), "Bearer mF_9.B5f-4.1JqM");
 //!
-//! let parsed = BearerToken::from_authorization("Bearer mF_9.B5f-4.1JqM").unwrap();
+//! let parsed = HttpAuthBearer::from_authorization("Bearer mF_9.B5f-4.1JqM").unwrap();
 //! assert_eq!(parsed.expose_secret(), "mF_9.B5f-4.1JqM");
 //! ```
 //!
@@ -32,9 +32,9 @@ pub enum BearerError {
 
 /// OAuth 2.0 Bearer token; redacted in [`fmt::Debug`], zeroed on drop.
 #[derive(Clone)]
-pub struct BearerToken(SecretString);
+pub struct HttpAuthBearer(SecretString);
 
-impl BearerToken {
+impl HttpAuthBearer {
     /// Wraps a token string.
     pub fn new(token: impl Into<String>) -> Self {
         Self(SecretString::from(token.into()))
@@ -54,31 +54,33 @@ impl BearerToken {
     }
 }
 
-impl ExposeSecret<str> for BearerToken {
+impl ExposeSecret<str> for HttpAuthBearer {
     fn expose_secret(&self) -> &str {
         self.0.expose_secret()
     }
 }
 
-impl fmt::Debug for BearerToken {
+impl fmt::Debug for HttpAuthBearer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("BearerToken").field(&"[REDACTED]").finish()
+        f.debug_tuple("HttpAuthBearer")
+            .field(&"[REDACTED]")
+            .finish()
     }
 }
 
-impl fmt::Display for BearerToken {
+impl fmt::Display for HttpAuthBearer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.0.expose_secret())
     }
 }
 
-impl PartialEq for BearerToken {
+impl PartialEq for HttpAuthBearer {
     fn eq(&self, other: &Self) -> bool {
         self.0.expose_secret() == other.0.expose_secret()
     }
 }
 
-impl Eq for BearerToken {}
+impl Eq for HttpAuthBearer {}
 
 #[cfg(test)]
 mod tests {
@@ -90,28 +92,28 @@ mod tests {
 
     #[test]
     fn to_authorization_rfc_example() {
-        let token = BearerToken::new("mF_9.B5f-4.1JqM");
+        let token = HttpAuthBearer::new("mF_9.B5f-4.1JqM");
         assert_eq!(token.to_authorization(), "Bearer mF_9.B5f-4.1JqM");
     }
 
     #[test]
     fn to_authorization_has_bearer_prefix() {
-        let token = BearerToken::new("sometoken");
+        let token = HttpAuthBearer::new("sometoken");
         assert!(token.to_authorization().starts_with("Bearer "));
     }
 
     #[test]
     fn from_authorization_roundtrip() {
-        let original = BearerToken::new("eyJhbGciOiJSUzI1NiJ9.example");
+        let original = HttpAuthBearer::new("eyJhbGciOiJSUzI1NiJ9.example");
         let header = original.to_authorization();
-        let parsed = BearerToken::from_authorization(&header).unwrap();
+        let parsed = HttpAuthBearer::from_authorization(&header).unwrap();
         assert_eq!(parsed, original);
     }
 
     #[test]
     fn from_authorization_missing_prefix() {
         assert!(matches!(
-            BearerToken::from_authorization("Basic dXNlcjpwYXNz"),
+            HttpAuthBearer::from_authorization("Basic dXNlcjpwYXNz"),
             Err(BearerError::MissingPrefix)
         ));
     }
@@ -119,19 +121,19 @@ mod tests {
     #[test]
     fn from_authorization_jwt_shaped_token() {
         let value = "Bearer header.payload.signature";
-        let token = BearerToken::from_authorization(value).unwrap();
+        let token = HttpAuthBearer::from_authorization(value).unwrap();
         assert_eq!(token.expose_secret(), "header.payload.signature");
     }
 
     #[test]
     fn display_yields_token_string() {
-        let token = BearerToken::new("abc123");
+        let token = HttpAuthBearer::new("abc123");
         assert_eq!(token.to_string(), "abc123");
     }
 
     #[test]
     fn debug_redacts_token() {
-        let token = BearerToken::new("super-secret-token");
+        let token = HttpAuthBearer::new("super-secret-token");
         let debug = format!("{token:?}");
         assert!(
             !debug.contains("super-secret-token"),
