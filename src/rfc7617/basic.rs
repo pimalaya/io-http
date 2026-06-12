@@ -31,7 +31,7 @@ use thiserror::Error;
 
 /// Failure causes when parsing a `Basic` authorization value.
 #[derive(Debug, Error)]
-pub enum BasicError {
+pub enum HttpAuthBasicError {
     #[error("Missing `Basic ` prefix in Authorization value")]
     MissingPrefix,
     #[error("Invalid base64 in Authorization value: {0}")]
@@ -67,17 +67,17 @@ impl HttpAuthBasic {
     }
 
     /// Parses a `Basic <b64>` header value.
-    pub fn from_authorization(value: &str) -> Result<Self, BasicError> {
+    pub fn from_authorization(value: &str) -> Result<Self, HttpAuthBasicError> {
         let encoded = value
             .strip_prefix("Basic ")
-            .ok_or(BasicError::MissingPrefix)?;
+            .ok_or(HttpAuthBasicError::MissingPrefix)?;
 
         let decoded = BASE64_STANDARD
             .decode(encoded)
-            .map_err(BasicError::InvalidBase64)?;
+            .map_err(HttpAuthBasicError::InvalidBase64)?;
 
-        let s = from_utf8(&decoded).map_err(|_| BasicError::InvalidUtf8)?;
-        let (username, password) = s.split_once(':').ok_or(BasicError::MissingColon)?;
+        let s = from_utf8(&decoded).map_err(|_| HttpAuthBasicError::InvalidUtf8)?;
+        let (username, password) = s.split_once(':').ok_or(HttpAuthBasicError::MissingColon)?;
 
         Ok(Self {
             username: username.into(),
@@ -156,7 +156,7 @@ mod tests {
     fn from_authorization_missing_prefix() {
         assert!(matches!(
             HttpAuthBasic::from_authorization("Bearer token"),
-            Err(BasicError::MissingPrefix)
+            Err(HttpAuthBasicError::MissingPrefix)
         ));
     }
 
@@ -164,7 +164,7 @@ mod tests {
     fn from_authorization_invalid_base64() {
         assert!(matches!(
             HttpAuthBasic::from_authorization("Basic !!!not-b64!!!"),
-            Err(BasicError::InvalidBase64(_))
+            Err(HttpAuthBasicError::InvalidBase64(_))
         ));
     }
 
@@ -173,7 +173,7 @@ mod tests {
         // base64("nocolon") = "bm9jb2xvbg=="
         assert!(matches!(
             HttpAuthBasic::from_authorization("Basic bm9jb2xvbg=="),
-            Err(BasicError::MissingColon)
+            Err(HttpAuthBasicError::MissingColon)
         ));
     }
 

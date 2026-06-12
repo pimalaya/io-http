@@ -15,8 +15,8 @@ use crate::{
     rfc1945::version::HTTP_10,
     rfc9110::{
         headers::CONNECTION,
-        response::{HttpResponse, ResponseBuilder},
-        status::StatusCode,
+        response::{HttpResponse, HttpResponseBuilder},
+        status::HttpStatusCode,
     },
     rfc9112::version::HTTP_11,
 };
@@ -73,11 +73,11 @@ impl HttpCoroutine for Http11ReadHeaders {
             }
         };
 
-        let mut builder = ResponseBuilder::default();
+        let mut builder = HttpResponseBuilder::default();
         let is_http10 = matches!(parsed.version, Some(0));
         builder.version = if is_http10 { HTTP_10 } else { HTTP_11 }.into();
         if let Some(code) = parsed.code {
-            builder.status = Some(StatusCode(code));
+            builder.status = Some(HttpStatusCode(code));
         }
         for header in parsed.headers.iter() {
             builder.header(header.name, header.value);

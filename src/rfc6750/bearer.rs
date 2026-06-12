@@ -25,7 +25,7 @@ use thiserror::Error;
 
 /// Failure causes when parsing a `Bearer` authorization value.
 #[derive(Debug, Error)]
-pub enum BearerError {
+pub enum HttpAuthBearerError {
     #[error("Missing `Bearer ` prefix in Authorization value")]
     MissingPrefix,
 }
@@ -46,10 +46,10 @@ impl HttpAuthBearer {
     }
 
     /// Parses a `Bearer <token>` header value.
-    pub fn from_authorization(value: &str) -> Result<Self, BearerError> {
+    pub fn from_authorization(value: &str) -> Result<Self, HttpAuthBearerError> {
         value
             .strip_prefix("Bearer ")
-            .ok_or(BearerError::MissingPrefix)
+            .ok_or(HttpAuthBearerError::MissingPrefix)
             .map(|token| Self(SecretString::from(String::from(token))))
     }
 }
@@ -114,7 +114,7 @@ mod tests {
     fn from_authorization_missing_prefix() {
         assert!(matches!(
             HttpAuthBearer::from_authorization("Basic dXNlcjpwYXNz"),
-            Err(BearerError::MissingPrefix)
+            Err(HttpAuthBearerError::MissingPrefix)
         ));
     }
 

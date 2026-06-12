@@ -6,9 +6,9 @@ use core::ops::Deref;
 
 /// HTTP status code.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct StatusCode(pub u16);
+pub struct HttpStatusCode(pub u16);
 
-impl StatusCode {
+impl HttpStatusCode {
     /// Returns `true` if the status code is in the `2xx` range.
     pub fn is_success(self) -> bool {
         self.0 >= 200 && self.0 < 300
@@ -20,7 +20,7 @@ impl StatusCode {
     }
 }
 
-impl Deref for StatusCode {
+impl Deref for HttpStatusCode {
     type Target = u16;
 
     fn deref(&self) -> &Self::Target {
@@ -34,19 +34,19 @@ mod tests {
 
     #[test]
     fn success_range() {
-        assert!(StatusCode(200).is_success());
-        assert!(StatusCode(204).is_success());
-        assert!(StatusCode(299).is_success());
-        assert!(!StatusCode(199).is_success());
-        assert!(!StatusCode(300).is_success());
+        assert!(HttpStatusCode(200).is_success());
+        assert!(HttpStatusCode(204).is_success());
+        assert!(HttpStatusCode(299).is_success());
+        assert!(!HttpStatusCode(199).is_success());
+        assert!(!HttpStatusCode(300).is_success());
     }
 
     #[test]
     fn redirection_range() {
-        assert!(StatusCode(300).is_redirection());
-        assert!(StatusCode(301).is_redirection());
-        assert!(StatusCode(399).is_redirection());
-        assert!(!StatusCode(299).is_redirection());
-        assert!(!StatusCode(400).is_redirection());
+        assert!(HttpStatusCode(300).is_redirection());
+        assert!(HttpStatusCode(301).is_redirection());
+        assert!(HttpStatusCode(399).is_redirection());
+        assert!(!HttpStatusCode(299).is_redirection());
+        assert!(!HttpStatusCode(400).is_redirection());
     }
 }
