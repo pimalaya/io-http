@@ -4,7 +4,7 @@
 //!
 //! [RFC 9112 §7.1]: https://www.rfc-editor.org/rfc/rfc9112#section-7.1
 
-use core::{fmt, mem};
+use core::mem;
 
 use alloc::{
     string::{String, ToString},
@@ -39,15 +39,6 @@ enum State {
     ChunkData(usize),
 }
 
-impl fmt::Display for State {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ChunkSize => f.write_str("read chunk size"),
-            Self::ChunkData(_) => f.write_str("read chunk data"),
-        }
-    }
-}
-
 /// I/O-free streaming chunked-body decoder. `Complete(Ok(remaining))`
 /// carries bytes already buffered past the zero-length terminator.
 #[derive(Debug, Default)]
@@ -68,8 +59,6 @@ impl HttpCoroutine for Http11ReadChunksStream {
         }
 
         loop {
-            trace!("{}", self.state);
-
             if self.wants_read {
                 self.wants_read = false;
                 return HttpCoroutineState::Yielded(Http11ReadChunksStreamYield::WantsRead);
@@ -105,6 +94,7 @@ impl HttpCoroutine for Http11ReadChunksStream {
                     };
 
                     self.buf.drain(..crlf + CRLF.len());
+                    trace!("reading chunk of {n} bytes");
                     self.state = State::ChunkData(n);
                 }
                 State::ChunkData(size) if self.buf.len() < size + CRLF.len() => {

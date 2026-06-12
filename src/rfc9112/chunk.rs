@@ -4,7 +4,7 @@
 //!
 //! [RFC 9112 §7.1]: https://www.rfc-editor.org/rfc/rfc9112#section-7.1
 
-use core::{fmt, mem};
+use core::mem;
 
 use alloc::{
     string::{String, ToString},
@@ -38,15 +38,6 @@ enum State {
     ChunkData(usize),
 }
 
-impl fmt::Display for State {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ChunkSize => f.write_str("read chunk size"),
-            Self::ChunkData(_) => f.write_str("read chunk data"),
-        }
-    }
-}
-
 /// I/O-free coroutine to read an HTTP response body using chunked
 /// transfer coding.
 #[derive(Debug, Default)]
@@ -68,8 +59,6 @@ impl HttpCoroutine for Http11ReadChunks {
         }
 
         loop {
-            trace!("{}", self.state);
-
             if self.wants_read {
                 self.wants_read = false;
                 return HttpCoroutineState::Yielded(HttpYield::WantsRead);
@@ -109,6 +98,7 @@ impl HttpCoroutine for Http11ReadChunks {
                     };
 
                     self.buf.drain(..crlf + CRLF.len());
+                    trace!("reading chunk of {n} bytes");
                     self.state = State::ChunkData(n);
                 }
                 State::ChunkData(size) if self.buf.len() < size + CRLF.len() => {

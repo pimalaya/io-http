@@ -56,7 +56,7 @@
 //!
 //! [RFC 9112]: https://www.rfc-editor.org/rfc/rfc9112
 
-use core::{fmt, mem};
+use core::mem;
 
 use alloc::{borrow::ToOwned, string::String, vec::Vec};
 
@@ -109,17 +109,6 @@ enum State {
     BodyChunks(Http11ReadChunks),
     BodyLength(usize),
     BodyEof,
-}
-
-impl fmt::Display for State {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ReadHeaders(_) => f.write_str("read headers"),
-            Self::BodyChunks(_) => f.write_str("read body chunks"),
-            Self::BodyLength(_) => f.write_str("read body length"),
-            Self::BodyEof => f.write_str("read body until eof"),
-        }
-    }
 }
 
 /// I/O-free coroutine to send an HTTP/1.1 request and receive its response.
@@ -191,8 +180,6 @@ impl HttpCoroutine for Http11Send {
 
     fn resume(&mut self, mut arg: Option<&[u8]>) -> HttpCoroutineState<Self::Yield, Self::Return> {
         loop {
-            trace!("{}", self.state);
-
             if let Some(bytes) = self.wants_write.take() {
                 return HttpCoroutineState::Yielded(HttpSendYield::WantsWrite(bytes));
             }
@@ -231,6 +218,7 @@ impl HttpCoroutine for Http11Send {
                                     }
                                     HttpCoroutineState::Yielded(HttpYield::WantsRead) => {
                                         self.response = Some(response);
+                                        trace!("reading chunked body");
                                         self.state = State::BodyChunks(chunks);
                                         return HttpCoroutineState::Yielded(
                                             HttpSendYield::WantsRead,
@@ -254,12 +242,14 @@ impl HttpCoroutine for Http11Send {
                             };
                             self.buf = out.remaining;
                             self.response = Some(response);
+                            trace!("reading body of length {len}");
                             self.state = State::BodyLength(len);
                             continue;
                         }
 
                         self.buf = out.remaining;
                         self.response = Some(response);
+                        trace!("reading body until connection closes");
                         self.state = State::BodyEof;
                     }
                 },
