@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   The credential types now carry the crate's `Http*` prefix so they read clearly when wrapped by higher-level crates (e.g. io-webdav's `WebdavAuth::Basic(HttpAuthBasic)`). The module paths (`rfc7617::basic`, `rfc6750::bearer`) and the `new` / `to_authorization` / `from_authorization` API are unchanged.
 
+- Renamed the remaining public types that were missing the crate prefix: `StatusCode` to `HttpStatusCode`, `BasicError` to `HttpAuthBasicError`, `BearerError` to `HttpAuthBearerError`, and the RFC 8615 `WellKnown` / `WellKnownOutput` / `WellKnownError` coroutine types to `Http11WellKnown` / `Http11WellKnownOutput` / `Http11WellKnownError`.
+
+  Every public type now carries the `Http` prefix (or `Http11` for HTTP/1.1-specific machinery): the auth error enums line up with their companion `HttpAuthBasic` / `HttpAuthBearer` structs, and `Http11WellKnown` reflects that it wraps `Http11Send`. The `Sse*` parser family keeps its own deliberate namespace. RFC module paths and the public API are otherwise unchanged.
+
+- Replaced the per-iteration `State` trace dump with a descriptive `trace!` line emitted on each state transition, and dropped the `fmt::Display` impls on the private `State` enums.
+
+  Send and chunked-body coroutines now log a readable line when they advance (e.g. "looking for body of length 42", "reading chunked body", "reading chunk of 6 bytes") instead of printing the state name on every `resume`. Messages no longer carry a protocol prefix, since the `log` target already records it.
+
 ## [0.1.1] - 2026-06-03
 
 ### Fixed

@@ -45,8 +45,8 @@ This library is composed of 3 feature-gated layers:
 | [1945]   | HTTP/1.0: request/response coroutine (`Http10Send`)                                                           |
 | [6750]   | OAuth 2.0 Bearer token: `Authorization: Bearer <token>`                                                       |
 | [7617]   | HTTP Basic authentication: `Authorization: Basic <base64(user:pass)>`                                         |
-| [8615]   | `.well-known` URI discovery: `WellKnown` coroutine                                                            |
-| [9110]   | HTTP semantics: shared types `HttpRequest`, `HttpResponse`, `StatusCode`, `HttpSendOutput`, `HttpSendYield`   |
+| [8615]   | `.well-known` URI discovery: `Http11WellKnown` coroutine                                                     |
+| [9110]   | HTTP semantics: shared types `HttpRequest`, `HttpResponse`, `HttpStatusCode`, `HttpSendOutput`, `HttpSendYield` |
 | [9112]   | HTTP/1.1: request/response (`Http11Send`), response-head (`Http11ReadHeaders`), chunked transfer (whole-body + streaming) |
 | `sse`    | W3C Server-Sent Events frame parser (HTML Living Standard)                                                    |
 
@@ -215,7 +215,7 @@ Have also a look at real-world projects built on top of this library:
 
 This project is developed with AI assistance. This section documents how, so users and downstream packagers can make informed decisions.
 
-- **Tools**: Claude Code (Anthropic), Opus 4.7, invoked locally with a persistent project-scoped memory and a small set of repo-specific rules.
+- **Tools**: Claude Code (Anthropic), Opus 4.8, invoked locally with a persistent project-scoped memory and a small set of repo-specific rules.
 
 - **Used for**: Refactors, mechanical multi-file edits, boilerplate (feature gates, error enums, derive macros, trait impls), test scaffolding, doc polish, exploratory design conversations.
 
@@ -225,7 +225,7 @@ This project is developed with AI assistance. This section documents how, so use
 
 - **Limitations**: AI models occasionally produce code that compiles and passes tests but is subtly wrong: off-by-one errors, missed edge cases, plausible but nonexistent APIs, stale RFC references. The verification workflow catches most of this; it does not catch all of it. Bug reports are welcome and taken seriously.
 
-- **Last reviewed**: 30/05/2026
+- **Last reviewed**: 13/06/2026
 
 ## License
 
