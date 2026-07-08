@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added the rfc9110 challenge module: `parse_challenges` turns a `WWW-Authenticate` header value into its `HttpChallenge` list (lowercased scheme, auth parameters unquoted with quoted-comma and escape handling, `token68` blobs skipped), `HttpChallenge::param` looks parameters up case-insensitively, and `HttpResponse::challenges` gathers every `WWW-Authenticate` header of a response. This is the shared primitive behind pimconf's authentication probe (scheme discovery, PACC §5.4.2) and io-oauth's RFC 9728 `resource_metadata` extraction, which previously each parsed the header themselves.
+
 ### Fixed
 
 - Generated a `Host` header from the request URL in the HTTP/1.1 serialiser when the caller did not set one.
