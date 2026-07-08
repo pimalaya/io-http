@@ -305,7 +305,10 @@ mod tests {
         let mut coroutine = Http11Send::new(req);
 
         let bytes = expect_wants_write(&mut coroutine, None);
-        assert_eq!(bytes, b"GET / HTTP/1.1\r\ncontent-length: 0\r\n\r\n");
+        assert_eq!(
+            bytes,
+            b"GET / HTTP/1.1\r\nhost: example.com\r\ncontent-length: 0\r\n\r\n"
+        );
 
         expect_wants_read(&mut coroutine, None);
 

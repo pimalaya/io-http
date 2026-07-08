@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Generated a `Host` header from the request URL in the HTTP/1.1 serialiser when the caller did not set one.
+
+  RFC 9112 §3.2 requires `Host` on every HTTP/1.1 request, and servers commonly answer 400 without it (nginx does), which silently broke the RFC 8615 `.well-known` probe: posteo.net's carddav redirect was never seen and discovery fell back to the bare origin. The generated value keeps a non-default port and callers that set `Host` themselves (io-webdav) are untouched.
+
 ### Changed
 
 - Renamed `BasicCredentials` to `HttpAuthBasic` and `BearerToken` to `HttpAuthBearer`.

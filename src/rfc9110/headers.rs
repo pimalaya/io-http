@@ -16,6 +16,7 @@ pub const AUTHORIZATION: &str = "authorization";
 pub const CONNECTION: &str = "connection";
 pub const CONTENT_LENGTH: &str = "content-length";
 pub const COOKIE: &str = "cookie";
+pub const HOST: &str = "host";
 pub const LOCATION: &str = "location";
 pub const PROXY_AUTHENTICATE: &str = "proxy-authenticate";
 pub const PROXY_AUTHORIZATION: &str = "proxy-authorization";
