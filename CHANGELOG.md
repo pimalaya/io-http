@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-13
+
 ### Added
 
-- Added the rfc9110 challenge module: `parse_challenges` turns a `WWW-Authenticate` header value into its `HttpChallenge` list (lowercased scheme, auth parameters unquoted with quoted-comma and escape handling, `token68` blobs skipped), `HttpChallenge::param` looks parameters up case-insensitively, and `HttpResponse::challenges` gathers every `WWW-Authenticate` header of a response. This is the shared primitive behind pimconf's authentication probe (scheme discovery, PACC §5.4.2) and io-oauth's RFC 9728 `resource_metadata` extraction, which previously each parsed the header themselves.
+- Added the rfc9110 challenge module: `parse_challenges` turns a `WWW-Authenticate` header value into its `HttpChallenge` list (lowercased scheme, auth parameters unquoted with quoted-comma and escape handling, `token68` blobs skipped), `HttpChallenge::param` looks parameters up case-insensitively, and `HttpResponse::challenges` gathers every `WWW-Authenticate` header of a response. This is the shared primitive behind io-pim-discovery's authentication probe (scheme discovery, PACC §5.4.2) and its RFC 9728 `resource_metadata` extraction, which previously each parsed the header themselves.
 
 ### Fixed
 
@@ -144,7 +146,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Init HTTP 1.1 module with send coroutine
 
-[unreleased]: https://github.com/pimalaya/io-http/compare/v0.1.1..HEAD
+[unreleased]: https://github.com/pimalaya/io-http/compare/v0.2.0..HEAD
+[0.2.0]: https://github.com/pimalaya/io-http/compare/v0.1.1..v0.2.0
 [0.1.1]: https://github.com/pimalaya/io-http/compare/v0.1.0..v0.1.1
 [0.1.0]: https://github.com/pimalaya/io-http/compare/v0.0.3..v0.1.0
 [0.0.3]: https://github.com/pimalaya/io-http/compare/v0.0.2..v0.0.3
