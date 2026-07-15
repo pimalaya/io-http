@@ -2,14 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.3.0] - 2026-07-15
 
 ### Changed
 
 - Renamed the verb-first coroutines to the target-first naming convention: `Http11ReadHeaders` is now `Http11HeadersRead`, `Http11ReadChunks` is now `Http11ChunksRead` and `Http11ReadChunksStream` is now `Http11ChunksReadStream`, their `Error`/`Output`/`Yield` companions along.
 - Prefixed the header name constants with `HTTP_` (`HTTP_HOST`, `HTTP_AUTHORIZATION`, `HTTP_SENSITIVE_HEADERS`, ...); moved challenge parsing onto `HttpChallenge::parse_all` (was the free `parse_challenges`) and the default ALPN onto `HttpClientStd::default_alpn` (was the free `default_alpn`); the character constants module is no longer public.
+- Aligned logging with the Pimalaya guidelines: send coroutines log their request preparation as a debug plus a data trace, body-reading state changes were promoted from trace to debug, and the SSE parser no longer logs at the top of every resume.
 - Bumped pimalaya-stream to 0.1.
 
 ## [0.2.0] - 2026-07-13
@@ -151,7 +155,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 - Init HTTP 1.1 module with send coroutine
 
-[unreleased]: https://github.com/pimalaya/io-http/compare/v0.2.0..HEAD
+[unreleased]: https://github.com/pimalaya/io-http/compare/v0.3.0..HEAD
+[0.3.0]: https://github.com/pimalaya/io-http/compare/v0.2.0..v0.3.0
 [0.2.0]: https://github.com/pimalaya/io-http/compare/v0.1.1..v0.2.0
 [0.1.1]: https://github.com/pimalaya/io-http/compare/v0.1.0..v0.1.1
 [0.1.0]: https://github.com/pimalaya/io-http/compare/v0.0.3..v0.1.0
