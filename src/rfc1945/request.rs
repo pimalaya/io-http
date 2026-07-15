@@ -8,7 +8,7 @@ use crate::{
     rfc1945::version::HTTP_10,
     rfc9110::{
         chars::{CRLF, CRLF_CRLF, SP},
-        headers::CONTENT_LENGTH,
+        headers::HTTP_CONTENT_LENGTH,
         request::HttpRequest,
     },
 };
@@ -33,7 +33,7 @@ impl HttpRequest {
         bytes.extend(CRLF);
 
         for (key, val) in &self.headers {
-            if key.eq_ignore_ascii_case(CONTENT_LENGTH) {
+            if key.eq_ignore_ascii_case(HTTP_CONTENT_LENGTH) {
                 continue;
             }
 
@@ -44,7 +44,7 @@ impl HttpRequest {
         }
 
         let body_len = format!("{}", self.body.len());
-        bytes.extend(CONTENT_LENGTH.as_bytes());
+        bytes.extend(HTTP_CONTENT_LENGTH.as_bytes());
         bytes.extend(b": ");
         bytes.extend(body_len.as_bytes());
         bytes.extend(CRLF_CRLF);

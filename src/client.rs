@@ -5,6 +5,8 @@
 //! [`HttpClientStd::connect`] opens `http://` / `https://` URLs
 //! end-to-end via [`pimalaya_stream::std::stream::StreamStd`].
 
+use core::mem;
+
 #[cfg(any(
     feature = "rustls-aws",
     feature = "rustls-ring",
@@ -28,7 +30,7 @@ use crate::{
     coroutine::*,
     rfc1945::send::*,
     rfc9110::{
-        headers::TRANSFER_ENCODING,
+        headers::HTTP_TRANSFER_ENCODING,
         request::HttpRequest,
         response::HttpResponse,
         send::{HttpSendOutput, HttpSendYield},
@@ -39,25 +41,21 @@ use crate::{
 
 const READ_BUFFER_SIZE: usize = 16 * 1024;
 
-/// Default ALPN identifier for HTTPS connections: `http/1.1`
-/// ([RFC 7301] + IANA registry).
-///
-/// [RFC 7301]: https://www.rfc-editor.org/rfc/rfc7301
-pub fn default_alpn() -> Vec<String> {
-    vec![String::from("http/1.1")]
-}
-
 /// Errors returned by [`HttpClientStd`].
 #[derive(Debug, Error)]
 pub enum HttpClientStdError {
+    /// The HTTP/1.0 send coroutine failed.
     #[error(transparent)]
     Http10Send(#[from] Http10SendError),
+    /// The HTTP/1.1 send coroutine failed.
     #[error(transparent)]
     Http11Send(#[from] Http11SendError),
 
+    /// The underlying stream failed to read or write.
     #[error(transparent)]
     Io(#[from] io::Error),
 
+    /// The TCP connection or the TLS negotiation failed.
     #[cfg(any(
         feature = "rustls-aws",
         feature = "rustls-ring",
@@ -65,6 +63,7 @@ pub enum HttpClientStdError {
     ))]
     #[error(transparent)]
     Tls(#[from] anyhow::Error),
+    /// The URL to connect to carries no host.
     #[cfg(any(
         feature = "rustls-aws",
         feature = "rustls-ring",
@@ -72,6 +71,7 @@ pub enum HttpClientStdError {
     ))]
     #[error("HTTP URL `{0}` has no host")]
     UrlMissingHost(String),
+    /// The URL to connect to carries a scheme the client cannot open.
     #[cfg(any(
         feature = "rustls-aws",
         feature = "rustls-ring",
@@ -80,13 +80,21 @@ pub enum HttpClientStdError {
     #[error("HTTP URL `{0}` has unsupported scheme `{1}` (expected `http` or `https`)")]
     UrlUnsupportedScheme(String, String),
 
+    /// The server answered with a redirect the client never follows.
     #[error("HTTP server redirected to `{url}` (status `{code}`)")]
-    UnexpectedRedirect { url: Url, code: u16 },
+    UnexpectedRedirect {
+        /// The resolved redirect target.
+        url: Url,
+        /// The 3xx status code of the response.
+        code: u16,
+    },
 
+    /// The streaming response did not use chunked transfer coding.
     #[error("HTTP streaming requires `Transfer-Encoding: chunked` (got status `{0}`)")]
     StreamingNotChunked(u16),
+    /// The streaming chunked-body decoder failed.
     #[error(transparent)]
-    ChunkStream(#[from] Http11ReadChunksStreamError),
+    ChunkStream(#[from] Http11ChunksReadStreamError),
 }
 
 /// Std-blocking HTTP client wrapping a boxed `Read + Write + Send` stream.
@@ -102,8 +110,16 @@ impl HttpClientStd {
         }
     }
 
+    /// Default ALPN identifier for HTTPS connections: `http/1.1`
+    /// ([RFC 7301] + IANA registry).
+    ///
+    /// [RFC 7301]: https://www.rfc-editor.org/rfc/rfc7301
+    pub fn default_alpn() -> Vec<String> {
+        vec![String::from("http/1.1")]
+    }
+
     /// Connects to `url` (TLS handshake on `https`), reading ALPN from
-    /// `tls.rustls.alpn` (see [`default_alpn`]).
+    /// `tls.rustls.alpn` (see [`Self::default_alpn`]).
     #[cfg(any(
         feature = "rustls-aws",
         feature = "rustls-ring",
@@ -140,7 +156,7 @@ impl HttpClientStd {
 
     /// Drives any standard-shape coroutine against the wrapped stream
     /// until it completes. Coroutines with richer Yield variants
-    /// (`Http*Send`, `Http11ReadChunksStream`, `SseFrameParser`) use
+    /// (`Http*Send`, `Http11ChunksReadStream`, `SseFrameParser`) use
     /// their own per-method loops below.
     pub fn run<C, T, E>(&mut self, mut coroutine: C) -> Result<T, HttpClientStdError>
     where
@@ -240,7 +256,7 @@ impl HttpClientStd {
         let req_bytes = request.to_http_11_vec();
         stream.write_all(&req_bytes)?;
 
-        let mut read_headers = Http11ReadHeaders::default();
+        let mut read_headers = Http11HeadersRead::default();
         let mut buf = [0u8; READ_BUFFER_SIZE];
         let mut arg: Option<&[u8]> = None;
 
@@ -258,14 +274,14 @@ impl HttpClientStd {
                     arg = Some(&buf[..n]);
                 }
                 HttpCoroutineState::Yielded(HttpYield::WantsWrite(_)) => {
-                    unreachable!("Http11ReadHeaders never writes");
+                    unreachable!("Http11HeadersRead never writes");
                 }
             }
         };
 
         let chunked = out
             .response
-            .header(TRANSFER_ENCODING)
+            .header(HTTP_TRANSFER_ENCODING)
             .is_some_and(|enc| enc.eq_ignore_ascii_case("chunked"));
 
         if !chunked {
@@ -276,7 +292,7 @@ impl HttpClientStd {
 
         Ok(SseStream {
             stream,
-            chunk_stream: Http11ReadChunksStream::default(),
+            chunk_stream: Http11ChunksReadStream::default(),
             sse_parser: SseFrameParser::default(),
             pending: None,
             preread: out.remaining,
@@ -292,7 +308,7 @@ impl HttpClientStd {
 /// event arrives or the connection closes.
 pub struct SseStream {
     stream: Box<dyn HttpStream>,
-    chunk_stream: Http11ReadChunksStream,
+    chunk_stream: Http11ChunksReadStream,
     sse_parser: SseFrameParser,
     pending: Option<Vec<u8>>,
     preread: Vec<u8>,
@@ -351,7 +367,7 @@ impl SseStream {
 
     fn pull_chunk(&mut self) -> Result<Option<Vec<u8>>, HttpClientStdError> {
         let mut tmp = [0u8; READ_BUFFER_SIZE];
-        let preread = core::mem::take(&mut self.preread);
+        let preread = mem::take(&mut self.preread);
         let mut arg: Option<&[u8]> = if preread.is_empty() {
             None
         } else {
@@ -360,11 +376,11 @@ impl SseStream {
 
         loop {
             match self.chunk_stream.resume(arg.take()) {
-                HttpCoroutineState::Yielded(Http11ReadChunksStreamYield::Frame { body }) => {
+                HttpCoroutineState::Yielded(Http11ChunksReadStreamYield::Frame { body }) => {
                     return Ok(Some(body));
                 }
                 HttpCoroutineState::Complete(Ok(_remaining)) => return Ok(None),
-                HttpCoroutineState::Yielded(Http11ReadChunksStreamYield::WantsRead) => {
+                HttpCoroutineState::Yielded(Http11ChunksReadStreamYield::WantsRead) => {
                     let n = self.stream.read(&mut tmp)?;
                     if n == 0 {
                         return Ok(None);
@@ -389,8 +405,8 @@ impl Iterator for SseStream {
     }
 }
 
-// Marker for everything the client can run against; the `Send`
-// supertrait propagates through the `Box<dyn HttpStream>` erasure so
-// `HttpClientStd` stays `Send`.
+/// Marker for everything the client can run against; the `Send`
+/// supertrait propagates through the `Box<dyn HttpStream>` erasure so
+/// [`HttpClientStd`] stays `Send`.
 trait HttpStream: Read + Write + Send {}
 impl<T: Read + Write + Send + ?Sized> HttpStream for T {}

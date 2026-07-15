@@ -1,45 +1,35 @@
 # Contributing guide
 
-Thank you for investing your time in contributing to the I/O HTTP project.
+Thank you for investing your time in contributing to I/O HTTP.
 
-## Development
+Whether you are a human or an AI agent, read these in order before touching the code:
 
-The development environment is managed by [Nix](https://nixos.org/download.html).
-Running `nix-shell` will spawn a shell with everything you need to get started with the lib.
+1. the [Pimalaya README](https://github.com/pimalaya) for what the project is and how its repositories stack;
+2. the [Pimalaya CONTRIBUTING](https://github.com/pimalaya/.github/blob/master/CONTRIBUTING.md) guide, which chains to the shared architecture and guidelines;
+3. the inline header documentation, starting with src/lib.rs (or src/main.rs): it is the architecture document of this crate;
+4. the docs/ folder for the development history and living plans.
 
-If you do not want to use Nix, you can either use [rustup](https://rust-lang.github.io/rustup/index.html):
+Everything below documents only what differs from the Pimalaya standards.
 
-```
-rustup update
-```
+## Feature matrix
 
-or install manually the following dependencies:
+io-http follows the standard three-layer split, plus a vendored switch compiling the TLS dependencies from source:
 
-- [cargo](https://doc.rust-lang.org/cargo/)
-- [rustc](https://doc.rust-lang.org/stable/rustc/platform-support.html) (`>= 1.87`)
-
-## Build
-
-```
-cargo build
-```
-
-## Test
-
-```
-cargo test
+```sh
+cargo build --no-default-features                        # coroutines only, no std leak
+cargo build --no-default-features --features client      # light client, no TLS deps
+cargo build                                              # full client (rustls-ring by default)
+cargo build --no-default-features --features rustls-aws  # full client, aws-lc-rs crypto
+cargo build --no-default-features --features native-tls  # full client, platform TLS
+cargo build --features vendored                          # vendored TLS dependencies
 ```
 
-## Override dependencies
+## Examples
 
-All Pimalaya crates use `[patch.crates-io]` to point to sibling directories.
-If you want to build io-http against a locally modified dependency (e.g. `pimalaya-stream`), add the following to `Cargo.toml`:
+Two examples pump the coroutines themselves and need no cargo feature; the last one uses the full client and requires the default TLS feature:
 
-```toml
-[patch.crates-io]
-pimalaya-stream.path = "/path/to/stream"
+```sh
+URL=http://example.com/ cargo run --example std_http10
+URL=https://example.com/ cargo run --example tokio_http11
+URL=https://example.com/ cargo run --example std_http11
 ```
-
-## Commit style
-
-I/O HTTP follows the [conventional commits specification](https://www.conventionalcommits.org/en/v1.0.0/#summary).

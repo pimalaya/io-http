@@ -7,7 +7,7 @@
 //! [RFC 9110]: https://www.rfc-editor.org/rfc/rfc9110
 
 pub mod challenge;
-pub mod chars;
+pub(crate) mod chars;
 pub mod headers;
 pub mod request;
 pub mod response;

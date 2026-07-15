@@ -32,12 +32,16 @@ use thiserror::Error;
 /// Failure causes when parsing a `Basic` authorization value.
 #[derive(Debug, Error)]
 pub enum HttpAuthBasicError {
+    /// The value does not start with the basic scheme prefix.
     #[error("Missing `Basic ` prefix in Authorization value")]
     MissingPrefix,
+    /// The credentials payload is not valid base64.
     #[error("Invalid base64 in Authorization value: {0}")]
     InvalidBase64(DecodeError),
+    /// The decoded credentials are not valid UTF-8.
     #[error("Decoded credentials are not valid UTF-8")]
     InvalidUtf8,
+    /// The decoded credentials carry no colon separator.
     #[error("Decoded credentials are missing the `:` separator")]
     MissingColon,
 }
@@ -46,7 +50,9 @@ pub enum HttpAuthBasicError {
 /// [`fmt::Debug`] and zeroed on drop.
 #[derive(Clone)]
 pub struct HttpAuthBasic {
+    /// The username, in clear.
     pub username: String,
+    /// The password, redacted in [`fmt::Debug`] and zeroed on drop.
     pub password: SecretString,
 }
 
@@ -170,7 +176,7 @@ mod tests {
 
     #[test]
     fn from_authorization_missing_colon() {
-        // base64("nocolon") = "bm9jb2xvbg=="
+        // NOTE: base64("nocolon") = "bm9jb2xvbg=="
         assert!(matches!(
             HttpAuthBasic::from_authorization("Basic bm9jb2xvbg=="),
             Err(HttpAuthBasicError::MissingColon)

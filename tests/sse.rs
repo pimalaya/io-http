@@ -7,6 +7,7 @@
 
 use std::{
     io::{self, Read, Write},
+    str::from_utf8,
     sync::{Arc, Mutex},
 };
 
@@ -94,7 +95,7 @@ fn writes_request_and_parses_headers() {
     assert!(sse.keep_alive());
 
     let written = mock.written();
-    let written = std::str::from_utf8(&written).unwrap();
+    let written = from_utf8(&written).unwrap();
     assert!(written.starts_with("GET /sse HTTP/1.1\r\n"));
     assert!(written.contains("Accept: text/event-stream"));
 }

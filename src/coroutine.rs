@@ -8,14 +8,20 @@ use alloc::vec::Vec;
 /// State yielded by an [`HttpCoroutine::resume`] step.
 #[derive(Debug)]
 pub enum HttpCoroutineState<Y, R> {
+    /// Intermediate step: the coroutine needs the caller to perform
+    /// the carried I/O request before the next resume.
     Yielded(Y),
+    /// Terminal step: the coroutine is done and carries its final
+    /// output or error.
     Complete(R),
 }
 
 /// Standard-shape HTTP coroutine: own internal state, declare per-step
 /// `Yield`, return `Result<Output, Error>` on completion.
 pub trait HttpCoroutine {
+    /// The intermediate value emitted on every yielded step.
     type Yield;
+    /// The terminal value emitted on completion.
     type Return;
 
     /// Advances one step. Pass [`None`] initially or after [`HttpYield::WantsWrite`];
@@ -27,7 +33,10 @@ pub trait HttpCoroutine {
 /// coroutine only reads or writes socket bytes.
 #[derive(Debug)]
 pub enum HttpYield {
+    /// The coroutine wants bytes read from the stream and handed back
+    /// on the next resume.
     WantsRead,
+    /// The coroutine wants these bytes written to the stream.
     WantsWrite(Vec<u8>),
 }
 

@@ -12,6 +12,7 @@ use alloc::{
 };
 
 use log::trace;
+use memchr::memchr;
 
 use crate::coroutine::*;
 
@@ -19,16 +20,23 @@ use crate::coroutine::*;
 /// `event:` field was absent; `data` has the trailing newline stripped.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SseFrame {
+    /// The event type, when the stream named one.
     pub event: Option<String>,
+    /// The event payload, data lines joined by newlines.
     pub data: String,
+    /// The last event id in effect when the event was dispatched.
     pub id: Option<String>,
+    /// The reconnection delay in milliseconds, when the stream set one.
     pub retry: Option<u64>,
 }
 
 /// Per-step yield emitted by [`SseFrameParser`].
 #[derive(Debug)]
 pub enum SseFrameParserYield {
+    /// One dispatched event.
     Frame(SseFrame),
+    /// The parser wants more body bytes handed back on the next
+    /// resume.
     WantsBytes,
 }
 
@@ -57,7 +65,6 @@ impl HttpCoroutine for SseFrameParser {
 
     fn resume(&mut self, arg: Option<&[u8]>) -> HttpCoroutineState<Self::Yield, Self::Return> {
         if let Some(data) = arg {
-            trace!("resume with {} bytes", data.len());
             self.buf.extend_from_slice(data);
         }
 
@@ -130,12 +137,12 @@ impl HttpCoroutine for SseFrameParser {
     }
 }
 
-// Returns (line_end_excl_terminator, total_consumed) or None when the
-// buffer doesn't yet contain a complete line. Terminator may be \r\n,
-// \n, or bare \r; a trailing \r is treated as incomplete pending \n.
+/// Returns (line_end_excl_terminator, total_consumed) or None when the
+/// buffer doesn't yet contain a complete line. Terminator may be \r\n,
+/// \n, or bare \r; a trailing \r is treated as incomplete pending \n.
 fn next_line(buf: &[u8]) -> Option<(usize, usize)> {
-    let cr = memchr::memchr(b'\r', buf);
-    let lf = memchr::memchr(b'\n', buf);
+    let cr = memchr(b'\r', buf);
+    let lf = memchr(b'\n', buf);
 
     match (cr, lf) {
         (Some(cr), Some(lf)) if cr + 1 == lf => Some((cr, lf + 1)),
@@ -158,10 +165,10 @@ fn next_line(buf: &[u8]) -> Option<(usize, usize)> {
     }
 }
 
-// Splits a non-empty SSE line on the first `:`; a single leading SP in
-// the value is stripped per spec.
+/// Splits a non-empty SSE line on the first `:`; a single leading SP
+/// in the value is stripped per spec.
 fn split_field(line: &[u8]) -> (&[u8], &[u8]) {
-    match memchr::memchr(b':', line) {
+    match memchr(b':', line) {
         None => (line, &[]),
         Some(colon) => {
             let name = &line[..colon];

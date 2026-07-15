@@ -1,54 +1,52 @@
 # I/O HTTP [![Documentation](https://img.shields.io/docsrs/io-http?style=flat&logo=docs.rs&logoColor=white)](https://docs.rs/io-http/latest/io_http) [![Matrix](https://img.shields.io/badge/chat-%23pimalaya-blue?style=flat&logo=matrix&logoColor=white)](https://matrix.to/#/#pimalaya:matrix.org) [![Mastodon](https://img.shields.io/badge/news-%40pimalaya-blue?style=flat&logo=mastodon&logoColor=white)](https://fosstodon.org/@pimalaya)
 
-HTTP/1.X client library, written in Rust
+HTTP client library for Rust
 
 This library is composed of 3 feature-gated layers:
 
-- Low-level **I/O-free** coroutines: these `no_std`-compatible state machines contain the whole HTTP/1.X logic and can be used anywhere
-- Mid-level **light client**: a standard, blocking HTTP client using a `Stream: Read + Write`
-- High-level **full client**: light client + TCP connections and TLS negotiations handled for you
+- Low-level **I/O-free** coroutines: no_std-compatible state machines containing the whole HTTP logic, usable anywhere
+- Mid-level **light client**: a standard, blocking client wrapping a stream you opened yourself
+- High-level **full client**: the light client plus TCP connections and TLS negotiations handled for you
 
 ## Table of contents
 
 - [Features](#features)
 - [RFC coverage](#rfc-coverage)
 - [Usage](#usage)
-  - [Coroutine](#coroutine)
-  - [Light client](#light-client)
-  - [Full client](#full-client)
 - [Examples](#examples)
 - [AI disclosure](#ai-disclosure)
 - [License](#license)
 - [Social](#social)
+- [Contributing](#contributing)
 - [Sponsoring](#sponsoring)
 
 ## Features
 
-- **I/O-free** coroutines: `no_std` state machines; no sockets, no async runtime, no `std` required, drive against any blocking, async, or fuzz harness.
-- Light standard, blocking client (requires `client` feature)
+- **I/O-free coroutines**: no_std state machines with no sockets and no async runtime, resumable from any blocking, async or in-memory test harness.
+- **HTTP/1.0 and HTTP/1.1**: send a request and receive its response, with fixed-length, chunked and read-to-EOF body strategies; redirects are surfaced to the caller, never followed silently.
+- **Streaming**: decode a long-lived chunked response one chunk at a time and consume server-sent events as they arrive.
+- **Authentication helpers**: build and parse basic and bearer authorization values, with credentials redacted from debug output and logs.
+- **Well-known discovery**: probe the reserved well-known location of a service and surface where it redirects.
+- Light standard, blocking client wrapping a stream you opened yourself
 - Full standard, blocking client with **TLS** support:
-  - [Rustls](https://crates.io/crates/rustls) with ring crypto (requires `rustls-ring` feature)
+  - [Rustls](https://crates.io/crates/rustls) with ring crypto (requires `rustls-ring` feature, enabled by default)
   - [Rustls](https://crates.io/crates/rustls) with aws crypto (requires `rustls-aws` feature)
   - [Native TLS](https://crates.io/crates/native-tls) (requires `native-tls` feature)
-- **HTTP versions**: HTTP/1.0 (RFC 1945) and HTTP/1.1 (RFC 9112) with fixed-length, chunked, and read-to-EOF body strategies.
-- **Streaming**: chunked decoder (`Http11ReadChunksStream`) + W3C Server-Sent Events parser (`SseFrameParser`) + std-blocking driver (`HttpClientStd::send_streaming`).
-- **Authentication helpers**: `Authorization: Bearer <token>` (RFC 6750) and `Authorization: Basic <base64(user:pass)>` (RFC 7617).
-- **`.well-known` discovery** (RFC 8615) shipped as a dedicated coroutine.
 
 > [!TIP]
 > I/O HTTP is written in [Rust](https://www.rust-lang.org/) and uses [cargo features](https://doc.rust-lang.org/cargo/reference/features.html) to gate backend support. The default feature set is declared in [Cargo.toml](./Cargo.toml) or on [docs.rs](https://docs.rs/crate/io-http/latest/features).
 
 ## RFC coverage
 
-| Module   | What it covers                                                                                                |
-|----------|---------------------------------------------------------------------------------------------------------------|
-| [1945]   | HTTP/1.0: request/response coroutine (`Http10Send`)                                                           |
-| [6750]   | OAuth 2.0 Bearer token: `Authorization: Bearer <token>`                                                       |
-| [7617]   | HTTP Basic authentication: `Authorization: Basic <base64(user:pass)>`                                         |
-| [8615]   | `.well-known` URI discovery: `Http11WellKnown` coroutine                                                     |
-| [9110]   | HTTP semantics: shared types `HttpRequest`, `HttpResponse`, `HttpStatusCode`, `HttpSendOutput`, `HttpSendYield` |
-| [9112]   | HTTP/1.1: request/response (`Http11Send`), response-head (`Http11ReadHeaders`), chunked transfer (whole-body + streaming) |
-| `sse`    | W3C Server-Sent Events frame parser (HTML Living Standard)                                                    |
+| RFC    | What is covered                                                                                      |
+|--------|------------------------------------------------------------------------------------------------------|
+| [1945] | HTTP/1.0: send a request and receive its response, connections closing after each exchange by default |
+| [6750] | Bearer authentication: carry an OAuth 2.0 access token in the authorization header                    |
+| [7617] | Basic authentication: carry a base64-encoded username and password pair in the authorization header   |
+| [8615] | Well-known discovery: probe the reserved well-known path of an origin and surface the redirect target |
+| [9110] | HTTP semantics: the version-agnostic request, response, status code and authentication challenge model shared by every wire format |
+| [9112] | HTTP/1.1: send a request and receive its response, including chunked bodies, both whole and streamed  |
+| [SSE]  | Server-sent events (WHATWG HTML Living Standard): decode an event stream one event at a time          |
 
 [1945]: https://www.rfc-editor.org/rfc/rfc1945
 [6750]: https://www.rfc-editor.org/rfc/rfc6750
@@ -56,175 +54,25 @@ This library is composed of 3 feature-gated layers:
 [8615]: https://www.rfc-editor.org/rfc/rfc8615
 [9110]: https://www.rfc-editor.org/rfc/rfc9110
 [9112]: https://www.rfc-editor.org/rfc/rfc9112
+[SSE]: https://html.spec.whatwg.org/multipage/server-sent-events.html
 
 ## Usage
 
-I/O-HTTP can be consumed three ways, depending on how much of the I/O stack you want to own. Each mode is gated by cargo features.
-
-Whichever mode you pick, every coroutine implements the `HttpCoroutine` trait. Its `resume(arg: Option<&[u8]>)` method returns a `HttpCoroutineState<Yield, Return>` with two variants:
-
-- `Yielded(Y)`: intermediate. `Y` is the per-coroutine yield type (e.g. `HttpYield::WantsRead` / `HttpYield::WantsWrite(Vec<u8>)` for most coroutines; `HttpSendYield::WantsRedirect { … }` for `Http*Send`; `SseFrameParserYield::Frame(SseFrame)` for the SSE parser).
-- `Complete(R)`: terminal. By convention `R = Result<Output, Error>` carrying the operation's final value.
-
-### Coroutine
-
-No features required: works in `#![no_std]`, no sockets, no async runtime. You own the loop and the bytes; the library only produces request bytes and consumes server responses.
-
-Send an HTTP/1.1 request against an async Tokio + rustls stack (the same shape works under blocking, fuzzing, or in-memory replay):
-
-```rust,no_run
-use std::sync::Arc;
-
-use io_http::{
-    coroutine::*,
-    rfc9110::{request::HttpRequest, send::HttpSendYield},
-    rfc9112::send::Http11Send,
-};
-use rustls::ClientConfig;
-use rustls_platform_verifier::ConfigVerifierExt;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
-};
-use tokio_rustls::TlsConnector;
-use url::Url;
-
-#[tokio::main]
-async fn main() {
-    let url = Url::parse("https://example.com/").unwrap();
-    let domain = url.domain().unwrap().to_owned();
-    let port = url.port_or_known_default().unwrap_or(443);
-
-    let config = Arc::new(ClientConfig::with_platform_verifier().unwrap());
-    let connector = TlsConnector::from(config);
-    let server_name = domain.clone().try_into().unwrap();
-    let tcp = TcpStream::connect((domain.as_str(), port)).await.unwrap();
-    let mut stream = connector.connect(server_name, tcp).await.unwrap();
-
-    let request = HttpRequest::get(url)
-        .header("Host", &domain)
-        .header("Connection", "close");
-
-    let mut send = Http11Send::new(request);
-    let mut arg: Option<&[u8]> = None;
-    let mut buf = [0u8; 4096];
-
-    let response = loop {
-        match send.resume(arg.take()) {
-            HttpCoroutineState::Complete(Ok(out)) => break out.response,
-            HttpCoroutineState::Complete(Err(err)) => panic!("{err}"),
-            HttpCoroutineState::Yielded(HttpSendYield::WantsRead) => {
-                let n = stream.read(&mut buf).await.unwrap();
-                arg = Some(&buf[..n]);
-            }
-            HttpCoroutineState::Yielded(HttpSendYield::WantsWrite(bytes)) => {
-                stream.write_all(&bytes).await.unwrap();
-            }
-            HttpCoroutineState::Yielded(HttpSendYield::WantsRedirect { url, .. }) => {
-                panic!("redirect to {url}");
-            }
-        }
-    };
-
-    println!("{} {}", response.version, *response.status);
-}
-```
-
-### Light client
-
-Enable the `client` feature. `HttpClientStd::new(stream)` wraps any blocking `Read + Write` and exposes `send` / `send_http10` / `send_streaming`. You still open the TCP socket and run TLS yourself, then hand over a ready-to-talk stream; the client takes it from there.
-
-```toml,ignore
-[dependencies]
-io-http = { version = "0.1.1", default-features = false, features = ["client"] }
-```
-
-```rust,no_run
-# fn main() -> Result<(), Box<dyn std::error::Error>> {
-use std::{net::TcpStream, sync::Arc};
-
-use io_http::{client::HttpClientStd, rfc9110::request::HttpRequest};
-use rustls::{ClientConfig, ClientConnection, StreamOwned};
-use rustls_platform_verifier::ConfigVerifierExt;
-use url::Url;
-
-let url = Url::parse("https://example.com/")?;
-let domain = url.domain().unwrap();
-
-let config = ClientConfig::with_platform_verifier()?;
-let server_name = domain.to_string().try_into()?;
-let conn = ClientConnection::new(Arc::new(config), server_name)?;
-let tcp = TcpStream::connect((domain, 443))?;
-let stream = StreamOwned::new(conn, tcp);
-
-let mut client = HttpClientStd::new(stream);
-
-let request = HttpRequest::get(url.clone())
-    .header("Host", domain)
-    .header("Connection", "close");
-
-let output = client.send(request)?;
-println!("{} {}", output.response.version, *output.response.status);
-# Ok(())
-# }
-```
-
-### Full client
-
-Enable one of the TLS feature flags: `rustls-ring` (default), `rustls-aws`, or `native-tls`. `HttpClientStd::connect(url, tls)` opens `http://` (plain TCP) or `https://` (implicit TLS) via [pimalaya/stream](https://github.com/pimalaya/stream), returning a ready-to-use client.
-
-```toml,ignore
-[dependencies]
-io-http = "0.1.1" # rustls-ring is enabled by default
-```
-
-```rust,no_run
-# fn main() -> Result<(), Box<dyn std::error::Error>> {
-use io_http::{client::HttpClientStd, rfc9110::request::HttpRequest};
-use pimalaya_stream::tls::Tls;
-use url::Url;
-
-let url = Url::parse("https://example.com/")?;
-let tls = Tls::default();
-let mut client = HttpClientStd::connect(&url, &tls)?;
-
-let request = HttpRequest::get(url.clone())
-    .header("Host", url.host_str().unwrap())
-    .header("Connection", "close");
-
-let output = client.send(request)?;
-println!("{} {}", output.response.version, *output.response.status);
-# Ok(())
-# }
-```
+The whole API is documented on [docs.rs](https://docs.rs/io-http/latest/io_http), including runnable snippets for every coroutine and client.
 
 ## Examples
 
-See complete examples at [./examples](https://github.com/pimalaya/io-http/blob/master/examples).
-
-Have also a look at real-world projects built on top of this library:
-
-- [io-jmap](https://github.com/pimalaya/io-jmap): Set of I/O-free Rust coroutines to manage JMAP sessions
-- [io-addressbook](https://github.com/pimalaya/io-addressbook): Set of I/O-free coroutines to manage contacts
-- [io-oauth](https://github.com/pimalaya/io-oauth): Set of I/O-free Rust coroutines to manage OAuth flows
-- [io-starttls](https://github.com/pimalaya/io-starttls): I/O-free Rust coroutine to upgrade any plain stream to a secure one
-- [Cardamum](https://github.com/pimalaya/cardamum): CLI to manage contacts
-- [Ortie](https://github.com/pimalaya/ortie): CLI to manage OAuth access tokens
+Complete runnable programs live in [./examples](./examples); the tests also demonstrate real usage.
 
 ## AI disclosure
 
 This project is developed with AI assistance. This section documents how, so users and downstream packagers can make informed decisions.
 
-- **Tools**: Claude Code (Anthropic), Opus 4.8, invoked locally with a persistent project-scoped memory and a small set of repo-specific rules.
-
+- **Tools**: Claude Code (Anthropic), invoked locally with a persistent project-scoped memory and a small set of repo-specific rules.
 - **Used for**: Refactors, mechanical multi-file edits, boilerplate (feature gates, error enums, derive macros, trait impls), test scaffolding, doc polish, exploratory design conversations.
-
 - **Not used for**: Engineering, critical code, git manipulation (commit, merge, rebase…), real-world tests.
-
-- **Verification**: Every AI-assisted change is read, compiled, tested, and formatted before commit (`nix develop --command cargo check / cargo test / cargo fmt`). Behavioural correctness is verified against the relevant RFC or upstream spec, not assumed from the model output. Tests are never adjusted to fit AI-generated code; the code is adjusted to fit correct behaviour.
-
-- **Limitations**: AI models occasionally produce code that compiles and passes tests but is subtly wrong: off-by-one errors, missed edge cases, plausible but nonexistent APIs, stale RFC references. The verification workflow catches most of this; it does not catch all of it. Bug reports are welcome and taken seriously.
-
+- **Verification**: Every AI-assisted change is read, compiled, tested, and formatted before commit. Behavioural correctness is verified against the relevant RFC or upstream spec, not assumed from the model output. Tests are never adjusted to fit AI-generated code; the code is adjusted to fit correct behaviour.
+- **Limitations**: AI models occasionally produce code that compiles and passes tests but is subtly wrong. The verification workflow catches most of this; it does not catch all of it. Bug reports are welcome and taken seriously.
 - **Last reviewed**: 13/06/2026
 
 ## License
@@ -241,6 +89,10 @@ at your option.
 - Chat on [Matrix](https://matrix.to/#/#pimalaya:matrix.org)
 - News on [Mastodon](https://fosstodon.org/@pimalaya) or [RSS](https://fosstodon.org/@pimalaya.rss)
 - Mail at [pimalaya.org@posteo.net](mailto:pimalaya.org@posteo.net)
+
+## Contributing
+
+Contributions are welcome: start with [CONTRIBUTING.md](./CONTRIBUTING.md), which opens with the Pimalaya-wide guides to read first.
 
 ## Sponsoring
 

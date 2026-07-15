@@ -26,6 +26,7 @@ use thiserror::Error;
 /// Failure causes when parsing a `Bearer` authorization value.
 #[derive(Debug, Error)]
 pub enum HttpAuthBearerError {
+    /// The value does not start with the bearer scheme prefix.
     #[error("Missing `Bearer ` prefix in Authorization value")]
     MissingPrefix,
 }

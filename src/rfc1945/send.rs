@@ -56,37 +56,40 @@ use core::mem;
 use alloc::{borrow::ToOwned, string::String, vec::Vec};
 
 use httparse::Error as HttparseError;
-use log::trace;
+use log::{debug, trace};
 use thiserror::Error;
 use url::Url;
 
 use crate::{
     coroutine::*,
     rfc9110::{
-        headers::{CONTENT_LENGTH, LOCATION},
+        headers::{HTTP_CONTENT_LENGTH, HTTP_LOCATION},
         request::HttpRequest,
         response::HttpResponse,
         send::{HttpSendOutput, HttpSendYield},
     },
-    rfc9112::read_headers::{Http11ReadHeaders, Http11ReadHeadersError},
+    rfc9112::read_headers::{Http11HeadersRead, Http11HeadersReadError},
 };
 
 /// Failure causes during the HTTP/1.0 send flow.
 #[derive(Debug, Error)]
 pub enum Http10SendError {
+    /// The stream reached EOF before the response was complete.
     #[error("HTTP/1.0 send failed: reached unexpected EOF")]
     Eof,
+    /// The response head could not be parsed.
     #[error("HTTP/1.0 send failed: parse response headers: {0}")]
     ParseResponseHeaders(HttparseError),
+    /// The content length header value is not a valid integer.
     #[error("HTTP/1.0 send failed: invalid content length `{0}`")]
     InvalidContentLength(String),
 }
 
-impl From<Http11ReadHeadersError> for Http10SendError {
-    fn from(err: Http11ReadHeadersError) -> Self {
+impl From<Http11HeadersReadError> for Http10SendError {
+    fn from(err: Http11HeadersReadError) -> Self {
         match err {
-            Http11ReadHeadersError::Eof => Self::Eof,
-            Http11ReadHeadersError::ParseResponseHeaders(e) => Self::ParseResponseHeaders(e),
+            Http11HeadersReadError::Eof => Self::Eof,
+            Http11HeadersReadError::ParseResponseHeaders(e) => Self::ParseResponseHeaders(e),
         }
     }
 }
@@ -106,14 +109,15 @@ impl Http10Send {
     /// Creates a new coroutine that will send the given request and
     /// receive its response.
     pub fn new(req: HttpRequest) -> Self {
-        trace!("prepare request to be sent: {req:?}");
+        debug!("prepare request to send");
+        trace!("{req:?}");
 
         let request_url = req.url.clone();
         let bytes = req.to_http_10_vec();
 
         Self {
             request_url,
-            state: State::ReadHeaders(Http11ReadHeaders::default()),
+            state: State::ReadHeaders(Http11HeadersRead::default()),
             wants_write: Some(bytes),
             keep_alive: false,
             response: None,
@@ -129,7 +133,7 @@ impl Http10Send {
         let keep_alive = self.keep_alive;
 
         if response.status.is_redirection() {
-            if let Some(location) = response.header(LOCATION) {
+            if let Some(location) = response.header(HTTP_LOCATION) {
                 if let Ok(url) = self.request_url.join(location) {
                     let same_scheme = self.request_url.scheme() == url.scheme();
                     let same_host = self.request_url.host() == url.host()
@@ -170,7 +174,7 @@ impl HttpCoroutine for Http10Send {
                         return HttpCoroutineState::Yielded(HttpSendYield::WantsRead);
                     }
                     HttpCoroutineState::Yielded(HttpYield::WantsWrite(_)) => {
-                        unreachable!("Http11ReadHeaders never writes");
+                        unreachable!("Http11HeadersRead never writes");
                     }
                     HttpCoroutineState::Complete(Err(err)) => {
                         return HttpCoroutineState::Complete(Err(err.into()));
@@ -184,7 +188,7 @@ impl HttpCoroutine for Http10Send {
                             return self.finish(response, out.remaining);
                         }
 
-                        if let Some(len_str) = response.header(CONTENT_LENGTH) {
+                        if let Some(len_str) = response.header(HTTP_CONTENT_LENGTH) {
                             let len_str = len_str.trim();
                             let Ok(len) = len_str.parse::<usize>() else {
                                 let err = Http10SendError::InvalidContentLength(len_str.to_owned());
@@ -192,14 +196,14 @@ impl HttpCoroutine for Http10Send {
                             };
                             self.buf = out.remaining;
                             self.response = Some(response);
-                            trace!("reading body of length {len}");
+                            debug!("reading body of length {len}");
                             self.state = State::BodyLength(len);
                             continue;
                         }
 
                         self.buf = out.remaining;
                         self.response = Some(response);
-                        trace!("reading body until connection closes");
+                        debug!("reading body until connection closes");
                         self.state = State::BodyEof;
                     }
                 },
@@ -241,14 +245,14 @@ impl HttpCoroutine for Http10Send {
 
 #[derive(Debug)]
 enum State {
-    ReadHeaders(Http11ReadHeaders),
+    ReadHeaders(Http11HeadersRead),
     BodyLength(usize),
     BodyEof,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::{coroutine::*, rfc1945::send::*};
 
     #[test]
     fn body_length_completes() {
@@ -311,8 +315,6 @@ mod tests {
         };
         assert_eq!(s, "notanumber");
     }
-
-    // --- utils
 
     fn expect_wants_write(cor: &mut Http10Send, arg: Option<&[u8]>) -> Vec<u8> {
         match cor.resume(arg) {

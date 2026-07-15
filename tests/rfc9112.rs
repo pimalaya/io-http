@@ -1,4 +1,4 @@
-//! Tests for RFC 9112 — HTTP/1.1 message syntax.
+//! Tests for RFC 9112: HTTP/1.1 message syntax.
 //!
 //! All tests drive [`Http11Send`] against a pre-crafted in-memory
 //! response buffer. No network connection is made.
@@ -7,7 +7,7 @@ use io_http::{
     coroutine::*,
     rfc9110::{request::HttpRequest, send::*},
     rfc9112::{
-        chunk::Http11ReadChunks,
+        chunk::Http11ChunksRead,
         send::{Http11Send, Http11SendError},
     },
 };
@@ -69,7 +69,7 @@ fn body_chunked() {
 fn body_read_to_eof() {
     let response = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nhello world";
 
-    // EOF terminates the body when neither Content-Length nor
+    // NOTE: EOF terminates the body when neither Content-Length nor
     // Transfer-Encoding is present, so drive an explicit empty read.
     let url = Url::parse("http://example.com/").unwrap();
     let request = HttpRequest::get(url).header("Host", "example.com");
@@ -125,8 +125,8 @@ fn body_empty_on_304() {
 fn body_chunked_ignored_on_http10_response() {
     let response = b"HTTP/1.0 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
 
-    // No Content-Length → falls back to read-to-EOF; drive an empty
-    // read after the response bytes.
+    // NOTE: no Content-Length, so the body falls back to read-to-EOF;
+    // drive an empty read after the response bytes.
     let url = Url::parse("http://example.com/").unwrap();
     let request = HttpRequest::get(url).header("Host", "example.com");
     let mut send = Http11Send::new(request);
@@ -146,7 +146,8 @@ fn body_chunked_ignored_on_http10_response() {
     };
 
     match result {
-        // Body must be the raw wire bytes, not the decoded chunk payload.
+        // NOTE: the body must be the raw wire bytes, not the decoded
+        // chunk payload.
         HttpCoroutineState::Complete(Ok(out)) => assert_ne!(out.response.body, b"hello"),
         other => panic!("unexpected result: {other:?}"),
     }
@@ -171,8 +172,6 @@ fn keep_alive_false_on_connection_close() {
         other => panic!("unexpected result: {other:?}"),
     }
 }
-
-// ── Redirects ─────────────────────────────────────────────────────────────────
 
 #[test]
 fn redirect_301_emits_redirect_yield() {
@@ -248,7 +247,7 @@ fn err_on_malformed_headers() {
 }
 
 fn test_chunks(encoded: &[u8]) -> Vec<u8> {
-    let mut chunks = Http11ReadChunks::default();
+    let mut chunks = Http11ChunksRead::default();
 
     match chunks.resume(Some(encoded)) {
         HttpCoroutineState::Complete(Ok(out)) => out.body,
@@ -330,6 +329,6 @@ fn chunks_extension_ignored() {
 
 #[test]
 fn chunks_size_hex() {
-    // 0x0a = 10 bytes
+    // NOTE: 0x0a = 10 bytes
     assert_eq!(test_chunks(b"a\r\n0123456789\r\n0\r\n\r\n"), b"0123456789");
 }

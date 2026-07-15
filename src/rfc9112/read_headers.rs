@@ -7,14 +7,14 @@
 use alloc::vec::Vec;
 
 use httparse::{EMPTY_HEADER, Error as HttparseError, Response, Status};
-use log::trace;
+use log::{debug, trace};
 use thiserror::Error;
 
 use crate::{
     coroutine::*,
     rfc1945::version::HTTP_10,
     rfc9110::{
-        headers::CONNECTION,
+        headers::HTTP_CONNECTION,
         response::{HttpResponse, HttpResponseBuilder},
         status::HttpStatusCode,
     },
@@ -23,35 +23,41 @@ use crate::{
 
 /// Failure causes during the HTTP/1.X read-headers flow.
 #[derive(Debug, Error)]
-pub enum Http11ReadHeadersError {
+pub enum Http11HeadersReadError {
+    /// The stream reached EOF before the head was complete.
     #[error("HTTP/1.X read headers failed: reached unexpected EOF before headers were complete")]
     Eof,
+    /// The response head could not be parsed.
     #[error("HTTP/1.X read headers failed: parse response headers: {0}")]
     ParseResponseHeaders(HttparseError),
 }
 
-/// Terminal output of [`Http11ReadHeaders`]; `response.body` is empty.
+/// Terminal output of [`Http11HeadersRead`]; the response body is
+/// empty at this stage.
 #[derive(Debug)]
-pub struct Http11ReadHeadersOutput {
+pub struct Http11HeadersReadOutput {
+    /// The parsed response, head only.
     pub response: HttpResponse,
+    /// Bytes already buffered past the end of the head.
     pub remaining: Vec<u8>,
+    /// Whether the server signalled the connection can be reused.
     pub keep_alive: bool,
 }
 
 /// I/O-free coroutine to read and parse an HTTP/1.X response head.
 #[derive(Debug, Default)]
-pub struct Http11ReadHeaders {
+pub struct Http11HeadersRead {
     buf: Vec<u8>,
 }
 
-impl HttpCoroutine for Http11ReadHeaders {
+impl HttpCoroutine for Http11HeadersRead {
     type Yield = HttpYield;
-    type Return = Result<Http11ReadHeadersOutput, Http11ReadHeadersError>;
+    type Return = Result<Http11HeadersReadOutput, Http11HeadersReadError>;
 
     fn resume(&mut self, arg: Option<&[u8]>) -> HttpCoroutineState<Self::Yield, Self::Return> {
         match arg {
             Some(&[]) => {
-                return HttpCoroutineState::Complete(Err(Http11ReadHeadersError::Eof));
+                return HttpCoroutineState::Complete(Err(Http11HeadersReadError::Eof));
             }
             Some(data) => self.buf.extend_from_slice(data),
             None => {}
@@ -68,7 +74,7 @@ impl HttpCoroutine for Http11ReadHeaders {
             }
             Err(err) => {
                 return HttpCoroutineState::Complete(Err(
-                    Http11ReadHeadersError::ParseResponseHeaders(err),
+                    Http11HeadersReadError::ParseResponseHeaders(err),
                 ));
             }
         };
@@ -83,17 +89,18 @@ impl HttpCoroutine for Http11ReadHeaders {
             builder.header(header.name, header.value);
         }
 
-        let keep_alive = match builder.get_header(CONNECTION) {
+        let keep_alive = match builder.get_header(HTTP_CONNECTION) {
             Some(conn) => !conn.eq_ignore_ascii_case("close"),
             None => !is_http10,
         };
 
-        trace!("received complete headers: {builder:?}");
+        debug!("received complete headers");
+        trace!("{builder:?}");
 
         let response = builder.build(Vec::new());
         let remaining = self.buf.split_off(header_end);
 
-        HttpCoroutineState::Complete(Ok(Http11ReadHeadersOutput {
+        HttpCoroutineState::Complete(Ok(Http11HeadersReadOutput {
             response,
             remaining,
             keep_alive,
@@ -103,11 +110,11 @@ impl HttpCoroutine for Http11ReadHeaders {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::{coroutine::*, rfc9112::read_headers::*};
 
     #[test]
     fn parses_complete_head() {
-        let mut coroutine = Http11ReadHeaders::default();
+        let mut coroutine = Http11HeadersRead::default();
         let reply = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nbody";
 
         let out = expect_complete_ok(&mut coroutine, Some(reply));
@@ -119,20 +126,20 @@ mod tests {
 
     #[test]
     fn incomplete_head_wants_read() {
-        let mut coroutine = Http11ReadHeaders::default();
+        let mut coroutine = Http11HeadersRead::default();
         expect_wants_read(&mut coroutine, Some(b"HTTP/1.1 200 OK\r\n"));
     }
 
     #[test]
     fn eof_returns_eof_error() {
-        let mut coroutine = Http11ReadHeaders::default();
+        let mut coroutine = Http11HeadersRead::default();
         let err = expect_complete_err(&mut coroutine, Some(b""));
-        assert!(matches!(err, Http11ReadHeadersError::Eof));
+        assert!(matches!(err, Http11HeadersReadError::Eof));
     }
 
     #[test]
     fn http10_keep_alive_defaults_false() {
-        let mut coroutine = Http11ReadHeaders::default();
+        let mut coroutine = Http11HeadersRead::default();
         let reply = b"HTTP/1.0 200 OK\r\n\r\n";
         let out = expect_complete_ok(&mut coroutine, Some(reply));
         assert!(!out.keep_alive);
@@ -141,7 +148,7 @@ mod tests {
 
     #[test]
     fn http11_keep_alive_defaults_true() {
-        let mut coroutine = Http11ReadHeaders::default();
+        let mut coroutine = Http11HeadersRead::default();
         let reply = b"HTTP/1.1 200 OK\r\n\r\n";
         let out = expect_complete_ok(&mut coroutine, Some(reply));
         assert!(out.keep_alive);
@@ -149,15 +156,13 @@ mod tests {
 
     #[test]
     fn connection_close_overrides_default() {
-        let mut coroutine = Http11ReadHeaders::default();
+        let mut coroutine = Http11HeadersRead::default();
         let reply = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n";
         let out = expect_complete_ok(&mut coroutine, Some(reply));
         assert!(!out.keep_alive);
     }
 
-    // --- utils
-
-    fn expect_wants_read(cor: &mut Http11ReadHeaders, arg: Option<&[u8]>) {
+    fn expect_wants_read(cor: &mut Http11HeadersRead, arg: Option<&[u8]>) {
         match cor.resume(arg) {
             HttpCoroutineState::Yielded(HttpYield::WantsRead) => {}
             state => panic!("expected WantsRead, got {state:?}"),
@@ -165,9 +170,9 @@ mod tests {
     }
 
     fn expect_complete_ok(
-        cor: &mut Http11ReadHeaders,
+        cor: &mut Http11HeadersRead,
         arg: Option<&[u8]>,
-    ) -> Http11ReadHeadersOutput {
+    ) -> Http11HeadersReadOutput {
         match cor.resume(arg) {
             HttpCoroutineState::Complete(Ok(out)) => out,
             state => panic!("expected Complete(Ok), got {state:?}"),
@@ -175,9 +180,9 @@ mod tests {
     }
 
     fn expect_complete_err(
-        cor: &mut Http11ReadHeaders,
+        cor: &mut Http11HeadersRead,
         arg: Option<&[u8]>,
-    ) -> Http11ReadHeadersError {
+    ) -> Http11HeadersReadError {
         match cor.resume(arg) {
             HttpCoroutineState::Complete(Err(err)) => err,
             state => panic!("expected Complete(Err), got {state:?}"),

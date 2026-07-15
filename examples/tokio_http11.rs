@@ -36,7 +36,7 @@ async fn main() {
         Err(_) => "https://example.com/".parse().unwrap(),
     };
 
-    // loop for potential redirections
+    // NOTE: the outer loop follows potential redirections.
     let response = 'outer: loop {
         info!("connect to {url}");
 

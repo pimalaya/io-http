@@ -11,14 +11,20 @@ use alloc::{
 
 use url::Url;
 
-use crate::rfc9110::headers::SENSITIVE_HEADERS;
+use crate::rfc9110::headers::HTTP_SENSITIVE_HEADERS;
 
 /// An outgoing HTTP request.
 #[derive(Clone)]
 pub struct HttpRequest {
+    /// The request method, uppercase.
     pub method: String,
+    /// The request URL; scheme, host and port drive the connection,
+    /// path and query go on the request line.
     pub url: Url,
+    /// The request headers, in order, case preserved.
     pub headers: Vec<(String, String)>,
+    /// The request body; its length drives the generated content
+    /// length header.
     pub body: Vec<u8>,
 }
 
@@ -52,7 +58,9 @@ impl fmt::Debug for HttpRequest {
             .headers
             .iter()
             .map(|(k, v)| {
-                let sensitive = SENSITIVE_HEADERS.iter().any(|s| k.eq_ignore_ascii_case(s));
+                let sensitive = HTTP_SENSITIVE_HEADERS
+                    .iter()
+                    .any(|s| k.eq_ignore_ascii_case(s));
                 let v = if sensitive { "[REDACTED]" } else { v.as_str() };
                 (k.as_str(), v)
             })

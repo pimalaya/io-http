@@ -18,8 +18,10 @@ use crate::{
 /// Failure causes during the HTTP well-known discovery flow.
 #[derive(Debug, Error)]
 pub enum Http11WellKnownError {
+    /// The base URL could not be parsed.
     #[error("HTTP well-known failed: invalid base URL `{1}`")]
     InvalidBaseUrl(#[source] ParseError, String),
+    /// The inner HTTP/1.1 send coroutine failed.
     #[error("HTTP well-known failed: {0}")]
     Send(#[from] Http11SendError),
 }
@@ -29,9 +31,14 @@ pub enum Http11WellKnownError {
 /// redirect crosses scheme/host/port (do not forward credentials).
 #[derive(Debug)]
 pub struct Http11WellKnownOutput {
+    /// The response to the well-known probe.
     pub response: HttpResponse,
+    /// Whether the server signalled the connection can be reused.
     pub keep_alive: bool,
+    /// `false` when the redirect crosses scheme/host/port; do not
+    /// forward credentials without user consent.
     pub same_origin: bool,
+    /// The resolved redirect target, when the probe was redirected.
     pub redirect_url: Option<Url>,
 }
 
@@ -99,7 +106,7 @@ impl HttpCoroutine for Http11WellKnown {
 mod tests {
     use alloc::vec::Vec;
 
-    use super::*;
+    use crate::{coroutine::*, rfc8615::well_known::*};
 
     #[test]
     fn prepare_request_sets_well_known_path() {
@@ -177,8 +184,6 @@ mod tests {
             "expected Send(InvalidContentLength), got {err:?}",
         );
     }
-
-    // --- utils
 
     fn expect_wants_write(cor: &mut Http11WellKnown, arg: Option<&[u8]>) -> Vec<u8> {
         match cor.resume(arg) {

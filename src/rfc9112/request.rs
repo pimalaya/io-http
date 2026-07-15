@@ -7,7 +7,7 @@ use alloc::{format, vec::Vec};
 use crate::{
     rfc9110::{
         chars::{CRLF, CRLF_CRLF, SP},
-        headers::{CONTENT_LENGTH, HOST},
+        headers::{HTTP_CONTENT_LENGTH, HTTP_HOST},
         request::HttpRequest,
     },
     rfc9112::version::HTTP_11,
@@ -37,10 +37,10 @@ impl HttpRequest {
         let has_host = self
             .headers
             .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case(HOST));
+            .any(|(k, _)| k.eq_ignore_ascii_case(HTTP_HOST));
         if !has_host {
             if let Some(host) = self.url.host_str() {
-                bytes.extend(HOST.as_bytes());
+                bytes.extend(HTTP_HOST.as_bytes());
                 bytes.extend(b": ");
                 bytes.extend(host.as_bytes());
                 // NOTE: `Url` drops the port when it is the scheme
@@ -53,7 +53,7 @@ impl HttpRequest {
         }
 
         for (key, val) in &self.headers {
-            if key.eq_ignore_ascii_case(CONTENT_LENGTH) {
+            if key.eq_ignore_ascii_case(HTTP_CONTENT_LENGTH) {
                 continue;
             }
 
@@ -64,7 +64,7 @@ impl HttpRequest {
         }
 
         let body_len = format!("{}", self.body.len());
-        bytes.extend(CONTENT_LENGTH.as_bytes());
+        bytes.extend(HTTP_CONTENT_LENGTH.as_bytes());
         bytes.extend(b": ");
         bytes.extend(body_len.as_bytes());
         bytes.extend(CRLF_CRLF);

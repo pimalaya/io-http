@@ -15,8 +15,11 @@ use crate::{coroutine::HttpYield, rfc9110::response::HttpResponse};
 /// Terminal output of a successful HTTP request-response exchange.
 #[derive(Clone, Debug)]
 pub struct HttpSendOutput {
+    /// The parsed response, body included.
     pub response: HttpResponse,
+    /// Bytes already buffered past the end of the response.
     pub remaining: Vec<u8>,
+    /// Whether the server signalled the connection can be reused.
     pub keep_alive: bool,
 }
 
@@ -24,11 +27,19 @@ pub struct HttpSendOutput {
 /// [`Self::WantsRedirect`] to the standard [`HttpYield`] for 3xx responses.
 #[derive(Debug)]
 pub enum HttpSendYield {
+    /// The coroutine wants bytes read from the stream and handed back
+    /// on the next resume.
     WantsRead,
+    /// The coroutine wants these bytes written to the stream.
     WantsWrite(Vec<u8>),
+    /// The server answered with a 3xx and a parseable location; the
+    /// caller decides whether to follow.
     WantsRedirect {
+        /// The redirect target, resolved against the request URL.
         url: Url,
+        /// The 3xx response itself.
         response: HttpResponse,
+        /// Whether the server signalled the connection can be reused.
         keep_alive: bool,
         /// `false` when the redirect crosses scheme/host/port; do not
         /// forward credentials without user consent (RFC 9110 §15.4).

@@ -6,14 +6,18 @@ use core::{fmt, str};
 
 use alloc::{borrow::ToOwned, format, string::String, vec::Vec};
 
-use crate::rfc9110::{headers::SENSITIVE_HEADERS, status::HttpStatusCode};
+use crate::rfc9110::{headers::HTTP_SENSITIVE_HEADERS, status::HttpStatusCode};
 
 /// An incoming HTTP response. Header names are stored lowercase.
 #[derive(Clone)]
 pub struct HttpResponse {
+    /// The response status code.
     pub status: HttpStatusCode,
+    /// The protocol version token found on the status line.
     pub version: String,
+    /// The response headers, in order, names lowercased.
     pub headers: Vec<(String, String)>,
+    /// The response body, decoded when chunked.
     pub body: Vec<u8>,
 }
 
@@ -33,7 +37,9 @@ impl fmt::Debug for HttpResponse {
             .headers
             .iter()
             .map(|(k, v)| {
-                let sensitive = SENSITIVE_HEADERS.iter().any(|s| k.eq_ignore_ascii_case(s));
+                let sensitive = HTTP_SENSITIVE_HEADERS
+                    .iter()
+                    .any(|s| k.eq_ignore_ascii_case(s));
                 let v = if sensitive { "[REDACTED]" } else { v.as_str() };
                 (k.as_str(), v)
             })
@@ -169,8 +175,10 @@ mod tests {
 
     #[test]
     fn builder_build_transfers_fields() {
-        let mut builder = HttpResponseBuilder::default();
-        builder.status = Some(HttpStatusCode(404));
+        let mut builder = HttpResponseBuilder {
+            status: Some(HttpStatusCode(404)),
+            ..Default::default()
+        };
         builder.header("X-Custom", b"value");
         let response = builder.build(b"not found".to_vec());
         assert_eq!(*response.status, 404);

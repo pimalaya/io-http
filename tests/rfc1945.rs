@@ -1,4 +1,4 @@
-//! Tests for RFC 1945 — HTTP/1.0 message syntax.
+//! Tests for RFC 1945: HTTP/1.0 message syntax.
 //!
 //! All tests drive [`Http10Send`] against a pre-crafted in-memory
 //! response buffer. No network connection is made.
@@ -27,8 +27,8 @@ fn test(response: &'static [u8]) -> Step {
                 sent = true;
                 arg = Some(response);
             }
-            // After the response, signal EOF so a read-to-EOF body
-            // strategy can terminate.
+            // NOTE: after the response, signal EOF so a read-to-EOF
+            // body strategy can terminate.
             HttpCoroutineState::Yielded(HttpSendYield::WantsRead) => arg = Some(b""),
             any => return any,
         }

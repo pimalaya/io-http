@@ -14,7 +14,7 @@ use alloc::{
     vec::Vec,
 };
 
-use crate::rfc9110::{headers::WWW_AUTHENTICATE, response::HttpResponse};
+use crate::rfc9110::{headers::HTTP_WWW_AUTHENTICATE, response::HttpResponse};
 
 /// One authentication challenge: its scheme and auth parameters.
 ///
@@ -29,6 +29,45 @@ pub struct HttpChallenge {
 }
 
 impl HttpChallenge {
+    /// Parses one header value into its challenge list.
+    pub fn parse_all(value: &str) -> Vec<HttpChallenge> {
+        let mut challenges: Vec<HttpChallenge> = Vec::new();
+
+        for element in split_unquoted_commas(value) {
+            let element = element.trim();
+            if element.is_empty() {
+                continue;
+            }
+
+            match element.split_once(|c: char| c.is_ascii_whitespace()) {
+                // NOTE: a scheme followed by its first parameter or a
+                // token68 blob starts a new challenge.
+                Some((scheme, rest)) => {
+                    challenges.push(HttpChallenge {
+                        scheme: scheme.to_ascii_lowercase(),
+                        params: Vec::new(),
+                    });
+                    push_param(&mut challenges, rest.trim_start());
+                }
+                // NOTE: a lone element is a parameter of the current
+                // challenge when it reads as `name=value`, a new bare
+                // challenge otherwise.
+                None => {
+                    if element.contains('=') {
+                        push_param(&mut challenges, element);
+                    } else {
+                        challenges.push(HttpChallenge {
+                            scheme: element.to_ascii_lowercase(),
+                            params: Vec::new(),
+                        });
+                    }
+                }
+            }
+        }
+
+        challenges
+    }
+
     /// Returns the first parameter matching `name` (case-insensitive).
     pub fn param(&self, name: &str) -> Option<&str> {
         self.params
@@ -45,52 +84,13 @@ impl HttpResponse {
         let mut challenges = Vec::new();
 
         for (name, value) in &self.headers {
-            if name.eq_ignore_ascii_case(WWW_AUTHENTICATE) {
-                challenges.extend(parse_challenges(value));
+            if name.eq_ignore_ascii_case(HTTP_WWW_AUTHENTICATE) {
+                challenges.extend(HttpChallenge::parse_all(value));
             }
         }
 
         challenges
     }
-}
-
-/// Parses one header value into its challenge list.
-pub fn parse_challenges(value: &str) -> Vec<HttpChallenge> {
-    let mut challenges: Vec<HttpChallenge> = Vec::new();
-
-    for element in split_unquoted_commas(value) {
-        let element = element.trim();
-        if element.is_empty() {
-            continue;
-        }
-
-        match element.split_once(|c: char| c.is_ascii_whitespace()) {
-            // A scheme followed by its first parameter or a token68
-            // blob starts a new challenge.
-            Some((scheme, rest)) => {
-                challenges.push(HttpChallenge {
-                    scheme: scheme.to_ascii_lowercase(),
-                    params: Vec::new(),
-                });
-                push_param(&mut challenges, rest.trim_start());
-            }
-            // A lone element is a parameter of the current challenge
-            // when it reads as `name=value`, a new bare challenge
-            // otherwise.
-            None => {
-                if element.contains('=') {
-                    push_param(&mut challenges, element);
-                } else {
-                    challenges.push(HttpChallenge {
-                        scheme: element.to_ascii_lowercase(),
-                        params: Vec::new(),
-                    });
-                }
-            }
-        }
-    }
-
-    challenges
 }
 
 /// Attaches one `name=value` element to the last challenge; a
@@ -106,7 +106,7 @@ fn push_param(challenges: &mut [HttpChallenge], element: &str) {
 
     let stripped = element.trim_end_matches('=');
     if !stripped.contains('=') {
-        // A bare token or a token68 blob, not a parameter.
+        // NOTE: a bare token or a token68 blob, not a parameter.
         return;
     }
 
@@ -179,11 +179,11 @@ fn unquote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
 
-    use crate::rfc9110::challenge::parse_challenges;
+    use crate::rfc9110::challenge::HttpChallenge;
 
     #[test]
     fn single_challenge_with_params() {
-        let challenges = parse_challenges(
+        let challenges = HttpChallenge::parse_all(
             r#"Bearer resource_metadata="https://api.example.com/.well-known/oauth-protected-resource""#,
         );
 
@@ -197,7 +197,7 @@ mod tests {
 
     #[test]
     fn multiple_challenges_share_the_comma_separator() {
-        let challenges = parse_challenges(
+        let challenges = HttpChallenge::parse_all(
             r#"Basic realm="carddav.example.com", Bearer, Digest qop="auth,auth-int""#,
         );
 
@@ -206,13 +206,13 @@ mod tests {
         assert_eq!(challenges[0].param("realm"), Some("carddav.example.com"));
         assert_eq!(challenges[1].scheme, "bearer");
         assert!(challenges[1].params.is_empty());
-        // The quoted comma does not split the digest parameter.
+        // NOTE: the quoted comma does not split the digest parameter.
         assert_eq!(challenges[2].param("qop"), Some("auth,auth-int"));
     }
 
     #[test]
     fn token68_blobs_are_not_parameters() {
-        let challenges = parse_challenges("Negotiate YWJjZGVmZw==, Basic realm=dav");
+        let challenges = HttpChallenge::parse_all("Negotiate YWJjZGVmZw==, Basic realm=dav");
 
         assert_eq!(challenges.len(), 2);
         assert_eq!(challenges[0].scheme, "negotiate");
@@ -222,7 +222,7 @@ mod tests {
 
     #[test]
     fn quoted_escapes_resolve() {
-        let challenges = parse_challenges(r#"Basic realm="a \"quoted\" realm""#);
+        let challenges = HttpChallenge::parse_all(r#"Basic realm="a \"quoted\" realm""#);
         assert_eq!(challenges[0].param("realm"), Some(r#"a "quoted" realm"#));
     }
 }
