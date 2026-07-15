@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 - Renamed the verb-first coroutines to the target-first naming convention: `Http11ReadHeaders` is now `Http11HeadersRead`, `Http11ReadChunks` is now `Http11ChunksRead` and `Http11ReadChunksStream` is now `Http11ChunksReadStream`, their `Error`/`Output`/`Yield` companions along.
 - Prefixed the header name constants with `HTTP_` (`HTTP_HOST`, `HTTP_AUTHORIZATION`, `HTTP_SENSITIVE_HEADERS`, ...); moved challenge parsing onto `HttpChallenge::parse_all` (was the free `parse_challenges`) and the default ALPN onto `HttpClientStd::default_alpn` (was the free `default_alpn`); the character constants module is no longer public.
+- Bumped pimalaya-stream to 0.1.
 
 ## [0.2.0] - 2026-07-13
 

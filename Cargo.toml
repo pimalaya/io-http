@@ -1,6 +1,6 @@
 [package]
 name = "io-http"
-description = "HTTP/1.X client library"
+description = "HTTP client library for Rust"
 version = "0.2.0"
 authors = ["soywod <pimalaya.org@posteo.net>"]
 rust-version = "1.87"
@@ -13,6 +13,7 @@ documentation = "https://docs.rs/io-http/latest/io_http"
 repository = "https://github.com/pimalaya/io-http"
 
 [package.metadata.docs.rs]
+all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
@@ -50,7 +51,7 @@ base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 httparse = { version = "1.10", default-features = false }
 log = { version = "0.4", default-features = false }
 memchr = { version = "2.7", default-features = false }
-pimalaya-stream = { version = "0.0.1", default-features = false, optional = true }
+pimalaya-stream = { version = "0.1", default-features = false, optional = true }
 secrecy = { version = "0.10", default-features = false }
 thiserror = { version = "2", default-features = false }
 url = { version = "2.5", default-features = false }

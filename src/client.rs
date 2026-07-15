@@ -50,11 +50,9 @@ pub enum HttpClientStdError {
     /// The HTTP/1.1 send coroutine failed.
     #[error(transparent)]
     Http11Send(#[from] Http11SendError),
-
     /// The underlying stream failed to read or write.
     #[error(transparent)]
     Io(#[from] io::Error),
-
     /// The TCP connection or the TLS negotiation failed.
     #[cfg(any(
         feature = "rustls-aws",
@@ -79,7 +77,6 @@ pub enum HttpClientStdError {
     ))]
     #[error("HTTP URL `{0}` has unsupported scheme `{1}` (expected `http` or `https`)")]
     UrlUnsupportedScheme(String, String),
-
     /// The server answered with a redirect the client never follows.
     #[error("HTTP server redirected to `{url}` (status `{code}`)")]
     UnexpectedRedirect {
@@ -88,7 +85,6 @@ pub enum HttpClientStdError {
         /// The 3xx status code of the response.
         code: u16,
     },
-
     /// The streaming response did not use chunked transfer coding.
     #[error("HTTP streaming requires `Transfer-Encoding: chunked` (got status `{0}`)")]
     StreamingNotChunked(u16),
