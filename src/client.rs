@@ -1,28 +1,25 @@
-//! Standard, blocking HTTP/1.X client wrapping a boxed
-//! `Read + Write + Send` stream. Each [`HttpClientStd::send`] /
-//! [`HttpClientStd::send_http10`] is self-contained (HTTP has no
-//! session context). With a TLS feature enabled,
+//! # HTTP client surfaces
+//!
+//! Two traits and one implementation of them. [`HttpClient`] and
+//! [`HttpClientAsync`] carry the request surface: implement the two
+//! pumps and inherit the commands. [`HttpClientStd`] is the opinionated
+//! blocking implementation, wrapping a boxed `Read + Write + Send`
+//! stream.
+//!
+//! Each [`send`] / [`send_http10`] is self-contained, HTTP having no
+//! session context. With a TLS feature enabled,
 //! [`HttpClientStd::connect`] opens `http://` / `https://` URLs
 //! end-to-end via [`pimalaya_stream::std::stream::StreamStd`].
+//!
+//! [`send`]: HttpClient::send
+//! [`send_http10`]: HttpClient::send_http10
 
-use core::mem;
+use core::{future::Future, mem};
 
-#[cfg(any(
-    feature = "rustls-aws",
-    feature = "rustls-ring",
-    feature = "native-tls"
-))]
-use alloc::string::ToString;
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
 
 use std::io::{self, Read, Write};
 
-#[cfg(any(
-    feature = "rustls-aws",
-    feature = "rustls-ring",
-    feature = "native-tls"
-))]
-use pimalaya_stream::{std::stream::StreamStd, tls::Tls};
 use thiserror::Error;
 use url::Url;
 
@@ -39,11 +36,18 @@ use crate::{
     sse::frame::*,
 };
 
+#[cfg(any(
+    feature = "rustls-aws",
+    feature = "rustls-ring",
+    feature = "native-tls"
+))]
+mod connect;
+
 const READ_BUFFER_SIZE: usize = 16 * 1024;
 
-/// Errors returned by [`HttpClientStd`].
+/// Errors returned by the client surfaces.
 #[derive(Debug, Error)]
-pub enum HttpClientStdError {
+pub enum HttpClientError {
     /// The HTTP/1.0 send coroutine failed.
     #[error(transparent)]
     Http10Send(#[from] Http10SendError),
@@ -62,19 +66,9 @@ pub enum HttpClientStdError {
     #[error(transparent)]
     Tls(#[from] anyhow::Error),
     /// The URL to connect to carries no host.
-    #[cfg(any(
-        feature = "rustls-aws",
-        feature = "rustls-ring",
-        feature = "native-tls"
-    ))]
     #[error("HTTP URL `{0}` has no host")]
     UrlMissingHost(String),
     /// The URL to connect to carries a scheme the client cannot open.
-    #[cfg(any(
-        feature = "rustls-aws",
-        feature = "rustls-ring",
-        feature = "native-tls"
-    ))]
     #[error("HTTP URL `{0}` has unsupported scheme `{1}` (expected `http` or `https`)")]
     UrlUnsupportedScheme(String, String),
     /// The server answered with a redirect the client never follows.
@@ -91,6 +85,119 @@ pub enum HttpClientStdError {
     /// The streaming chunked-body decoder failed.
     #[error(transparent)]
     ChunkStream(#[from] Http11ChunksReadStreamError),
+    /// The implementor's own transport failed.
+    ///
+    /// [`HttpClientStd`] reports I/O through [`Self::Io`]; this variant
+    /// exists for implementors whose failures are something else, such
+    /// as a JNI upcall or a runtime-specific socket error.
+    #[error(transparent)]
+    Transport(Box<dyn core::error::Error + Send + Sync>),
+}
+
+/// Blocking HTTP request surface: implement the two pumps and inherit
+/// the commands.
+///
+/// [`HttpClientStd`] implements it over a `Read + Write` stream; a
+/// caller whose transport is its own (a JNI upcall bridge, an in-memory
+/// test double) implements the same two methods and gets the rest.
+///
+/// There are two pumps rather than one because HTTP has two yield
+/// vocabularies. [`run`] takes the plain read/write coroutines, the ones
+/// every client wraps identically. [`run_send`] takes the request
+/// coroutines, which also yield [`HttpSendYield::WantsRedirect`], and
+/// that yield is a policy question: this crate's own client refuses a
+/// redirect, a browser-shaped one would follow it, and a consumer
+/// bounded by an allow-list would inspect it. Making it a required
+/// method puts the decision in the implementor's hands and keeps it out
+/// of the defaults.
+///
+/// The trait is not dyn-compatible, because both pumps are generic. The
+/// dynamism this crate needs lives one layer down, at the boxed stream
+/// [`HttpClientStd`] holds.
+///
+/// [`run`]: Self::run
+/// [`run_send`]: Self::run_send
+pub trait HttpClient {
+    /// Runs a standard-shape coroutine to completion, fulfilling its
+    /// read and write requests against the transport.
+    fn run<C, T, E>(&mut self, coroutine: C) -> Result<T, HttpClientError>
+    where
+        C: HttpCoroutine<Yield = HttpYield, Return = Result<T, E>>,
+        HttpClientError: From<E>;
+
+    /// Runs a request coroutine to completion, deciding what a redirect
+    /// means along the way.
+    fn run_send<C, E>(&mut self, coroutine: C) -> Result<HttpSendOutput, HttpClientError>
+    where
+        C: HttpCoroutine<Yield = HttpSendYield, Return = Result<HttpSendOutput, E>>,
+        HttpClientError: From<E>;
+
+    /// Sends one HTTP/1.1 request and reads its response.
+    fn send(&mut self, request: HttpRequest) -> Result<HttpSendOutput, HttpClientError> {
+        self.run_send(Http11Send::new(request))
+    }
+
+    /// HTTP/1.0 counterpart of [`send`](Self::send).
+    fn send_http10(&mut self, request: HttpRequest) -> Result<HttpSendOutput, HttpClientError> {
+        self.run_send(Http10Send::new(request))
+    }
+}
+
+/// Async HTTP request surface, the [`HttpClient`] twin for callers
+/// whose transport is a future.
+///
+/// Everything [`HttpClient`] documents applies here, plus the `Send`
+/// bounds. They are load-bearing rather than defensive: a plain `async
+/// fn` in a trait cannot promise that the future it returns is `Send`,
+/// so anything built from the default bodies would fail to compile
+/// under `tokio::spawn`, which is the first thing a worker-spawning
+/// consumer reaches for. Declaring the return type explicitly as `impl
+/// Future<..> + Send`, with `Send` as a supertrait so `&mut Self`
+/// carries through, keeps the defaults spawnable.
+///
+/// [`HttpClient`] deliberately carries no such bound. A blocking call
+/// returns a value, so there is no future whose auto-traits need
+/// pinning down, and requiring `Send` there would exclude a perfectly
+/// good client built on a thread-affine handle.
+pub trait HttpClientAsync: Send {
+    /// Runs a standard-shape coroutine to completion, fulfilling its
+    /// read and write requests against the transport.
+    fn run<C, T, E>(
+        &mut self,
+        coroutine: C,
+    ) -> impl Future<Output = Result<T, HttpClientError>> + Send
+    where
+        C: HttpCoroutine<Yield = HttpYield, Return = Result<T, E>> + Send,
+        T: Send,
+        E: Send,
+        HttpClientError: From<E>;
+
+    /// Runs a request coroutine to completion, deciding what a redirect
+    /// means along the way.
+    fn run_send<C, E>(
+        &mut self,
+        coroutine: C,
+    ) -> impl Future<Output = Result<HttpSendOutput, HttpClientError>> + Send
+    where
+        C: HttpCoroutine<Yield = HttpSendYield, Return = Result<HttpSendOutput, E>> + Send,
+        E: Send,
+        HttpClientError: From<E>;
+
+    /// Sends one HTTP/1.1 request and reads its response.
+    fn send(
+        &mut self,
+        request: HttpRequest,
+    ) -> impl Future<Output = Result<HttpSendOutput, HttpClientError>> + Send {
+        self.run_send(Http11Send::new(request))
+    }
+
+    /// HTTP/1.0 counterpart of [`send`](Self::send).
+    fn send_http10(
+        &mut self,
+        request: HttpRequest,
+    ) -> impl Future<Output = Result<HttpSendOutput, HttpClientError>> + Send {
+        self.run_send(Http10Send::new(request))
+    }
 }
 
 /// Std-blocking HTTP client wrapping a boxed `Read + Write + Send` stream.
@@ -114,50 +221,18 @@ impl HttpClientStd {
         vec![String::from("http/1.1")]
     }
 
-    /// Connects to `url` (TLS handshake on `https`), reading ALPN from
-    /// `tls.rustls.alpn` (see [`Self::default_alpn`]).
-    #[cfg(any(
-        feature = "rustls-aws",
-        feature = "rustls-ring",
-        feature = "native-tls"
-    ))]
-    pub fn connect(url: &Url, tls: &Tls) -> Result<Self, HttpClientStdError> {
-        let host = url
-            .host_str()
-            .ok_or_else(|| HttpClientStdError::UrlMissingHost(url.to_string()))?;
-
-        let stream = match url.scheme() {
-            "http" => StreamStd::connect_tcp(host, url.port_or_known_default().unwrap_or(80))?,
-            "https" => {
-                StreamStd::connect_tls(host, url.port_or_known_default().unwrap_or(443), tls)?
-            }
-            scheme => {
-                return Err(HttpClientStdError::UrlUnsupportedScheme(
-                    url.to_string(),
-                    scheme.to_string(),
-                ));
-            }
-        };
-
-        Ok(Self {
-            stream: Box::new(stream),
-        })
-    }
-
     /// Replaces the underlying stream (e.g. after `Connection: close` or
     /// a cross-authority redirect).
     pub fn set_stream<S: Read + Write + Send + 'static>(&mut self, stream: S) {
         self.stream = Box::new(stream);
     }
+}
 
-    /// Drives any standard-shape coroutine against the wrapped stream
-    /// until it completes. Coroutines with richer Yield variants
-    /// (`Http*Send`, `Http11ChunksReadStream`, `SseFrameParser`) use
-    /// their own per-method loops below.
-    pub fn run<C, T, E>(&mut self, mut coroutine: C) -> Result<T, HttpClientStdError>
+impl HttpClient for HttpClientStd {
+    fn run<C, T, E>(&mut self, mut coroutine: C) -> Result<T, HttpClientError>
     where
         C: HttpCoroutine<Yield = HttpYield, Return = Result<T, E>>,
-        HttpClientStdError: From<E>,
+        HttpClientError: From<E>,
     {
         let mut buf = [0u8; READ_BUFFER_SIZE];
         let mut arg: Option<&[u8]> = None;
@@ -178,10 +253,16 @@ impl HttpClientStd {
         }
     }
 
-    /// Runs [`Http11Send`]; surfaces 3xx as
-    /// [`HttpClientStdError::UnexpectedRedirect`].
-    pub fn send(&mut self, request: HttpRequest) -> Result<HttpSendOutput, HttpClientStdError> {
-        let mut coroutine = Http11Send::new(request);
+    /// Refuses a redirect with [`HttpClientError::UnexpectedRedirect`],
+    /// this client following none: a request carrying credentials must
+    /// not replay them against whatever host a 3xx names, and the
+    /// caller is the only party that knows whether the new target is
+    /// one it meant to talk to.
+    fn run_send<C, E>(&mut self, mut coroutine: C) -> Result<HttpSendOutput, HttpClientError>
+    where
+        C: HttpCoroutine<Yield = HttpSendYield, Return = Result<HttpSendOutput, E>>,
+        HttpClientError: From<E>,
+    {
         let mut buf = [0u8; READ_BUFFER_SIZE];
         let mut arg: Option<&[u8]> = None;
 
@@ -200,40 +281,7 @@ impl HttpClientStd {
                 HttpCoroutineState::Yielded(HttpSendYield::WantsRedirect {
                     url, response, ..
                 }) => {
-                    return Err(HttpClientStdError::UnexpectedRedirect {
-                        url,
-                        code: *response.status,
-                    });
-                }
-            }
-        }
-    }
-
-    /// HTTP/1.0 counterpart of [`Self::send`].
-    pub fn send_http10(
-        &mut self,
-        request: HttpRequest,
-    ) -> Result<HttpSendOutput, HttpClientStdError> {
-        let mut coroutine = Http10Send::new(request);
-        let mut buf = [0u8; READ_BUFFER_SIZE];
-        let mut arg: Option<&[u8]> = None;
-
-        loop {
-            match coroutine.resume(arg.take()) {
-                HttpCoroutineState::Complete(Ok(out)) => return Ok(out),
-                HttpCoroutineState::Complete(Err(err)) => return Err(err.into()),
-                HttpCoroutineState::Yielded(HttpSendYield::WantsRead) => {
-                    let n = self.stream.read(&mut buf)?;
-                    arg = Some(&buf[..n]);
-                }
-                HttpCoroutineState::Yielded(HttpSendYield::WantsWrite(bytes)) => {
-                    self.stream.write_all(&bytes)?;
-                    arg = None;
-                }
-                HttpCoroutineState::Yielded(HttpSendYield::WantsRedirect {
-                    url, response, ..
-                }) => {
-                    return Err(HttpClientStdError::UnexpectedRedirect {
+                    return Err(HttpClientError::UnexpectedRedirect {
                         url,
                         code: *response.status,
                     });
@@ -246,7 +294,7 @@ impl HttpClientStd {
 impl HttpClientStd {
     /// Opens an HTTP/1.1 SSE stream; requires `Transfer-Encoding: chunked`.
     /// Consumes `self` because the connection is dedicated to the stream.
-    pub fn send_streaming(self, request: HttpRequest) -> Result<SseStream, HttpClientStdError> {
+    pub fn send_streaming(self, request: HttpRequest) -> Result<SseStream, HttpClientError> {
         let HttpClientStd { mut stream } = self;
 
         let req_bytes = request.to_http_11_vec();
@@ -281,9 +329,7 @@ impl HttpClientStd {
             .is_some_and(|enc| enc.eq_ignore_ascii_case("chunked"));
 
         if !chunked {
-            return Err(HttpClientStdError::StreamingNotChunked(
-                *out.response.status,
-            ));
+            return Err(HttpClientError::StreamingNotChunked(*out.response.status));
         }
 
         Ok(SseStream {
@@ -331,7 +377,7 @@ impl SseStream {
 
     /// Drives chunked + SSE decoding until the next event; [`None`] on
     /// connection close or zero-length chunk terminator.
-    pub fn next_frame(&mut self) -> Result<Option<SseFrame>, HttpClientStdError> {
+    pub fn next_frame(&mut self) -> Result<Option<SseFrame>, HttpClientError> {
         if self.done {
             return Ok(None);
         }
@@ -361,7 +407,7 @@ impl SseStream {
         drop(self);
     }
 
-    fn pull_chunk(&mut self) -> Result<Option<Vec<u8>>, HttpClientStdError> {
+    fn pull_chunk(&mut self) -> Result<Option<Vec<u8>>, HttpClientError> {
         let mut tmp = [0u8; READ_BUFFER_SIZE];
         let preread = mem::take(&mut self.preread);
         let mut arg: Option<&[u8]> = if preread.is_empty() {
@@ -390,7 +436,7 @@ impl SseStream {
 }
 
 impl Iterator for SseStream {
-    type Item = Result<SseFrame, HttpClientStdError>;
+    type Item = Result<SseFrame, HttpClientError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.next_frame() {

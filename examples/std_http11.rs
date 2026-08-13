@@ -12,7 +12,10 @@
 
 use std::env;
 
-use io_http::{client::HttpClientStd, rfc9110::request::HttpRequest};
+use io_http::{
+    client::{HttpClient, HttpClientStd},
+    rfc9110::request::HttpRequest,
+};
 use log::info;
 use pimalaya_stream::tls::Tls;
 use url::Url;

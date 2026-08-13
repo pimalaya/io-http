@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added the `client::HttpClient` and `client::HttpClientAsync` traits. Implement two pumps, inherit the requests.
+
+  There are two required methods rather than one because HTTP has two yield vocabularies: `run` takes the plain read/write coroutines, the ones every client wraps identically, and `run_send` takes the request coroutines, which also yield `HttpSendYield::WantsRedirect`. That yield is a policy question, this crate's own client refusing a redirect where a browser-shaped one would follow it, so it belongs to the implementor rather than to a default body. `HttpClientAsync` declares `-> impl Future<..> + Send` with `Send` as a supertrait, so anything built from a default body survives `tokio::spawn`; a plain `async fn` in a trait cannot express that. `HttpClient` carries no `Send` bound on purpose, since a blocking call returns a value rather than a future and the bound would exclude a thread-affine client such as a JNI bridge. Neither trait is dyn-compatible: the dynamism this crate needs lives at the boxed stream.
+
+- Added the tokio client example, implementing `HttpClientAsync` over a tokio socket and tokio-rustls, and following redirects from the caller rather than from the pump, the new authority needing a new socket.
+
+### Changed
+
+- Moved `run`, `send` and `send_http10` off `HttpClientStd` and onto the `HttpClient` trait. **Breaking.**
+
+  Callers add `use io_http::client::HttpClient;`. The methods keep their names and semantics, and the redirect refusal moved into `HttpClientStd`'s `run_send`. `send_streaming`, which consumes the client and hands back an `SseStream` iterator, stays inherent: it encodes a runtime-specific choice rather than a request every client makes the same way.
+
+- Renamed `client::HttpClientStdError` to `client::HttpClientError` and gave it a `Transport` variant. **Breaking.**
+
+  It is now the error type of both client traits rather than of one concrete client, so the name no longer says `Std`. `Transport` carries a boxed error for implementors whose I/O is not `std::io::Error`, such as a JNI upcall.
+
 ## [0.3.0] - 2026-07-15
 
 ### Changed

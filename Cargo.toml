@@ -33,6 +33,11 @@ name = "tokio_http11"
 path = "examples/tokio_http11.rs"
 
 [[example]]
+name = "tokio_client"
+path = "examples/tokio_client.rs"
+required-features = ["client"]
+
+[[example]]
 name = "std_http11"
 path = "examples/std_http11.rs"
 required-features = ["rustls-ring"]
@@ -47,11 +52,14 @@ url = { version = "2.5", default-features = false }
 
 [dependencies]
 anyhow = { version = "1", optional = true }
-base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 httparse = { version = "1.10", default-features = false }
 log = { version = "0.4", default-features = false }
 memchr = { version = "2.7", default-features = false }
-pimalaya-stream = { version = "0.1", default-features = false, optional = true }
+pimalaya-stream = { version = "0.2", default-features = false, optional = true }
 secrecy = { version = "0.10", default-features = false }
 thiserror = { version = "2", default-features = false }
 url = { version = "2.5", default-features = false }
+
+[patch.crates-io]
+pimalaya-stream.git = "https://github.com/pimalaya/stream"

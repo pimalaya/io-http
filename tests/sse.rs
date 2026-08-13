@@ -12,7 +12,7 @@ use std::{
 };
 
 use io_http::{
-    client::{HttpClientStd, HttpClientStdError, SseStream},
+    client::{HttpClientError, HttpClientStd, SseStream},
     rfc9110::request::HttpRequest,
 };
 use url::Url;
@@ -74,7 +74,7 @@ fn request() -> HttpRequest {
         .header("Accept", "text/event-stream")
 }
 
-fn open(response: &[u8]) -> (MockStream, Result<SseStream, HttpClientStdError>) {
+fn open(response: &[u8]) -> (MockStream, Result<SseStream, HttpClientError>) {
     let stream = MockStream::new(response);
     let client = HttpClientStd::new(stream.clone());
     let result = client.send_streaming(request());
@@ -107,7 +107,7 @@ fn rejects_non_chunked_response() {
     let (_mock, sse) = open(response);
 
     match sse {
-        Err(HttpClientStdError::StreamingNotChunked(code)) => assert_eq!(code, 200),
+        Err(HttpClientError::StreamingNotChunked(code)) => assert_eq!(code, 200),
         Err(err) => panic!("unexpected error: {err:?}"),
         Ok(_) => panic!("expected StreamingNotChunked"),
     }
