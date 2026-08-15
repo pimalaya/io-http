@@ -7,23 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-15
+
 ### Added
 
-- Added the `client::HttpClient` and `client::HttpClientAsync` traits. Implement two pumps, inherit the requests.
+- Added the `client::HttpClient` and `client::HttpClientAsync` traits, turning the coroutines every client drives identically into defaulted methods.
 
-  There are two required methods rather than one because HTTP has two yield vocabularies: `run` takes the plain read/write coroutines, the ones every client wraps identically, and `run_send` takes the request coroutines, which also yield `HttpSendYield::WantsRedirect`. That yield is a policy question, this crate's own client refusing a redirect where a browser-shaped one would follow it, so it belongs to the implementor rather than to a default body. `HttpClientAsync` declares `-> impl Future<..> + Send` with `Send` as a supertrait, so anything built from a default body survives `tokio::spawn`; a plain `async fn` in a trait cannot express that. `HttpClient` carries no `Send` bound on purpose, since a blocking call returns a value rather than a future and the bound would exclude a thread-affine client such as a JNI bridge. Neither trait is dyn-compatible: the dynamism this crate needs lives at the boxed stream.
+  Two pumps are required rather than one: `run` for the plain read/write coroutines, `run_send` for the request ones, whose `HttpSendYield::WantsRedirect` is a policy the implementor owns. The async trait returns `impl Future<..> + Send` so its defaults survive `tokio::spawn`; the blocking one carries no `Send` bound, leaving room for a thread-affine client such as a JNI bridge.
 
-- Added the tokio client example, implementing `HttpClientAsync` over a tokio socket and tokio-rustls, and following redirects from the caller rather than from the pump, the new authority needing a new socket.
+- Added the tokio client example, implementing `HttpClientAsync` over a tokio socket and tokio-rustls.
 
 ### Changed
 
-- Moved `run`, `send` and `send_http10` off `HttpClientStd` and onto the `HttpClient` trait. **Breaking.**
+- Moved `run`, `send` and `send_http10` off `HttpClientStd` onto the `HttpClient` trait. **Breaking.**
 
-  Callers add `use io_http::client::HttpClient;`. The methods keep their names and semantics, and the redirect refusal moved into `HttpClientStd`'s `run_send`. `send_streaming`, which consumes the client and hands back an `SseStream` iterator, stays inherent: it encodes a runtime-specific choice rather than a request every client makes the same way.
+  Callers add `use io_http::client::HttpClient;`. `send_streaming` stays inherent, since consuming the client for an `SseStream` iterator is a runtime-specific choice.
 
 - Renamed `client::HttpClientStdError` to `client::HttpClientError` and gave it a `Transport` variant. **Breaking.**
 
-  It is now the error type of both client traits rather than of one concrete client, so the name no longer says `Std`. `Transport` carries a boxed error for implementors whose I/O is not `std::io::Error`, such as a JNI upcall.
+  It is the error type of both traits now, and `Transport` boxes an error for implementors whose I/O is not `std::io::Error`.
+
+- Bumped pimalaya-stream to 0.2, which drops its SASL module. The `Tls` type `HttpClientStd::connect` takes comes from that version.
+- Bumped base64 to 0.23.
+- Raised the minimum supported Rust version from 1.87 to 1.88.
 
 ## [0.3.0] - 2026-07-15
 
@@ -173,7 +179,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Init HTTP 1.1 module with send coroutine
 
-[unreleased]: https://github.com/pimalaya/io-http/compare/v0.3.0..HEAD
+[unreleased]: https://github.com/pimalaya/io-http/compare/v0.4.0..HEAD
+[0.4.0]: https://github.com/pimalaya/io-http/compare/v0.3.0..v0.4.0
 [0.3.0]: https://github.com/pimalaya/io-http/compare/v0.2.0..v0.3.0
 [0.2.0]: https://github.com/pimalaya/io-http/compare/v0.1.1..v0.2.0
 [0.1.1]: https://github.com/pimalaya/io-http/compare/v0.1.0..v0.1.1
