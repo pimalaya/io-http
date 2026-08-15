@@ -2,8 +2,8 @@
 name = "io-http"
 description = "HTTP client library for Rust"
 version = "0.3.0"
-authors = ["soywod <pimalaya.org@posteo.net>"]
-rust-version = "1.87"
+authors = ["Clément DOUIN (soywod) <pimalaya.org@posteo.net>"]
+rust-version = "1.88"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 categories = ["api-bindings", "no-std"]
@@ -60,6 +60,3 @@ pimalaya-stream = { version = "0.2", default-features = false, optional = true }
 secrecy = { version = "0.10", default-features = false }
 thiserror = { version = "2", default-features = false }
 url = { version = "2.5", default-features = false }
-
-[patch.crates-io]
-pimalaya-stream.git = "https://github.com/pimalaya/stream"
