@@ -56,7 +56,7 @@ base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 httparse = { version = "1.10", default-features = false }
 log = { version = "0.4", default-features = false }
 memchr = { version = "2.7", default-features = false }
-pimalaya-stream = { version = "0.2", default-features = false, optional = true }
+pimalaya-stream = { version = "0.3", default-features = false, optional = true }
 secrecy = { version = "0.10", default-features = false }
 thiserror = { version = "2", default-features = false }
 url = { version = "2.5", default-features = false }

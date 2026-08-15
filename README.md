@@ -27,8 +27,8 @@ This library is composed of 3 feature-gated layers:
 - **Streaming**: decode a long-lived chunked response one chunk at a time and consume server-sent events as they arrive.
 - **Authentication helpers**: build and parse basic and bearer authorization values, with credentials redacted from debug output and logs.
 - **Well-known discovery**: probe the reserved well-known location of a service and surface where it redirects.
-- Light standard, blocking client wrapping a stream you opened yourself
-- Full standard, blocking client with **TLS** support:
+- **Light client**: a standard, blocking client wrapping a stream you opened yourself.
+- **Full client** with **TLS** support:
   - [Rustls](https://crates.io/crates/rustls) with ring crypto (requires `rustls-ring` feature, enabled by default)
   - [Rustls](https://crates.io/crates/rustls) with aws crypto (requires `rustls-aws` feature)
   - [Native TLS](https://crates.io/crates/native-tls) (requires `native-tls` feature)
@@ -58,11 +58,11 @@ This library is composed of 3 feature-gated layers:
 
 ## Usage
 
-The whole API is documented on [docs.rs](https://docs.rs/io-http/latest/io_http), including runnable snippets for every coroutine and client.
+See documentation at [docs.rs](https://docs.rs/io-http/latest/io_http).
 
 ## Examples
 
-Complete runnable programs live in [./examples](./examples); the tests also demonstrate real usage.
+See complete examples at [./examples](./examples).
 
 ## License
 

@@ -706,9 +706,9 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pimalaya-stream"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df1a31126b778f0978fabd423f4036c3d44cf409efd6c85123cb526b5cee4a73"
+checksum = "b327ad009344854c74da2a96956f312241ffb90d8680159736d2303d50ae5cf2"
 dependencies = [
  "anyhow",
  "io-proxy",

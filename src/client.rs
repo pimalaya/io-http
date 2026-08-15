@@ -9,7 +9,7 @@
 //! Each [`send`] / [`send_http10`] is self-contained, HTTP having no
 //! session context. With a TLS feature enabled,
 //! [`HttpClientStd::connect`] opens `http://` / `https://` URLs
-//! end-to-end via [`pimalaya_stream::std::stream::StreamStd`].
+//! end-to-end via [`pimalaya_stream::stream::Stream`].
 //!
 //! [`send`]: HttpClient::send
 //! [`send_http10`]: HttpClient::send_http10

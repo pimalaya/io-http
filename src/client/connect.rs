@@ -6,7 +6,10 @@
 
 use alloc::{boxed::Box, string::ToString};
 
-use pimalaya_stream::{std::stream::StreamStd, tls::Tls};
+use pimalaya_stream::{
+    stream::{Stream, TcpConnectOptions, TlsConnectOptions},
+    tls::Tls,
+};
 use url::Url;
 
 use crate::client::{HttpClientError, HttpClientStd};
@@ -20,9 +23,19 @@ impl HttpClientStd {
             .ok_or_else(|| HttpClientError::UrlMissingHost(url.to_string()))?;
 
         let stream = match url.scheme() {
-            "http" => StreamStd::connect_tcp(host, url.port_or_known_default().unwrap_or(80))?,
+            "http" => {
+                let port = url.port_or_known_default().unwrap_or(80);
+                let opts = TcpConnectOptions::default();
+                Stream::connect_tcp(host, port, opts)?
+            }
             "https" => {
-                StreamStd::connect_tls(host, url.port_or_known_default().unwrap_or(443), tls)?
+                let port = url.port_or_known_default().unwrap_or(443);
+                let opts = TlsConnectOptions {
+                    tls: tls.clone(),
+                    ..Default::default()
+                };
+
+                Stream::connect_tls(host, port, opts)?
             }
             scheme => {
                 return Err(HttpClientError::UrlUnsupportedScheme(
