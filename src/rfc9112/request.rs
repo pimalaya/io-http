@@ -8,7 +8,7 @@ use crate::{
     rfc9110::{
         chars::{CRLF, CRLF_CRLF, SP},
         headers::{HTTP_CONTENT_LENGTH, HTTP_HOST},
-        request::HttpRequest,
+        request::{HttpRequest, HttpRequestError},
     },
     rfc9112::version::HTTP_11,
 };
@@ -17,8 +17,11 @@ impl HttpRequest {
     /// Serialises this request as an HTTP/1.1 message; `Content-Length`
     /// is regenerated from the body and any existing copy is dropped,
     /// and a `Host` is generated from the URL (RFC 9112 §3.2) when the
-    /// caller did not set one.
-    pub fn to_http_11_vec(&self) -> Vec<u8> {
+    /// caller did not set one. Fails on a method, a header name or a
+    /// header value that would add a line to the message.
+    pub fn to_http_11_vec(&self) -> Result<Vec<u8>, HttpRequestError> {
+        self.validate()?;
+
         let mut bytes = Vec::new();
 
         bytes.extend(self.method.as_bytes());
@@ -68,20 +71,20 @@ impl HttpRequest {
         bytes.extend(CRLF_CRLF);
         bytes.extend(&self.body);
 
-        bytes
+        Ok(bytes)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use alloc::string::String;
+    use alloc::{format, string::String};
 
     use url::Url;
 
     use crate::rfc9110::request::HttpRequest;
 
     fn serialize(req: &HttpRequest) -> String {
-        String::from_utf8(req.to_http_11_vec()).unwrap()
+        String::from_utf8(req.to_http_11_vec().unwrap()).unwrap()
     }
 
     #[test]
@@ -109,5 +112,29 @@ mod tests {
         let message = serialize(&req);
         assert!(message.contains("Host: override.example\r\n"));
         assert!(!message.contains("host: example.com\r\n"));
+    }
+
+    #[test]
+    fn no_char_adds_a_line_to_the_head() {
+        let request = || {
+            let url = Url::parse("https://example.com/").unwrap();
+            HttpRequest::get(url).header("X-A", "1")
+        };
+
+        let line_ends = |bytes: &[u8]| bytes.iter().filter(|b| b"\r\n".contains(b)).count();
+        let expected = line_ends(&request().to_http_11_vec().unwrap());
+
+        for c in (0..=0xFFu8).map(char::from) {
+            let mut method = request();
+            method.method = format!("GE{c}T");
+            let name = request().header(format!("X-{c}B"), "1");
+            let value = request().header("X-B", format!("1{c}"));
+
+            for (request, added) in [(method, 0), (name, 2), (value, 2)] {
+                if let Ok(bytes) = request.to_http_11_vec() {
+                    assert_eq!(line_ends(&bytes), expected + added, "{c:?}");
+                }
+            }
+        }
     }
 }

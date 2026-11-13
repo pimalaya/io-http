@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added the event stream parser to the `response` fuzz target.
 - Added a split against whole comparison to the `response` fuzz target.
 - Added `rfc9110::status::HttpStatusCode::is_informational`.
+- Added `rfc9110::request::HttpRequestError`.
+- Added `rfc3986::path::http_url_build`.
+
+  It appends path segments to a base URL, each percent-encoded on its own, and refuses an empty segment, a dot segment and a segment holding a tab or a line break.
+
+- Added `max_trailers_len` to `rfc9112::chunk::Http11ChunksRead`, 64 KiB by default.
+- Added `max_trailers_len` to `rfc9112::chunk_stream::Http11ChunksReadStream`, 64 KiB by default.
+- Added `rfc9112::read_headers::HTTP11_MAX_INTERIM_RESPONSES`.
 
 ### Changed
 
@@ -23,13 +31,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Its `Return` is now `Result<Infallible, SseFrameParserError>` instead of `Infallible`.
 
 - **BREAKING**: Changed `client::HttpClientError` to fail with `SseFrameParser`.
-- **BREAKING**: Changed `rfc9112::chunk::Http11ChunksReadError` to fail with `InvalidChunkTerminator` and `TrailerLineTooLarge`.
-- **BREAKING**: Changed `rfc9112::chunk_stream::Http11ChunksReadStreamError` to fail with `InvalidChunkTerminator` and `TrailerLineTooLarge`.
-- **BREAKING**: Changed `rfc9112::send::Http11SendError` to fail with `UnsupportedTransferCoding`.
+- **BREAKING**: Changed `rfc9112::chunk::Http11ChunksReadError` to fail with `InvalidChunkTerminator` and `TrailersTooLarge`.
+- **BREAKING**: Changed `rfc9112::chunk_stream::Http11ChunksReadStreamError` to fail with `InvalidChunkTerminator` and `TrailersTooLarge`.
+- **BREAKING**: Changed `rfc9112::send::Http11SendError` to fail with `UnsupportedTransferCoding`, `TooManyInterimResponses` and `InvalidRequest`.
 
-  A final transfer coding other than `chunked` fails the exchange. Codings before `chunked` stay applied to the body.
+  A final transfer coding other than `chunked` fails the exchange, a lone `identity` is ignored. Codings before `chunked` stay applied to the body.
 
-- Changed `rfc9112::read_headers::Http11HeadersRead` to skip interim 1xx responses, 101 excepted.
+- **BREAKING**: Changed `rfc1945::send::Http10SendError` to fail with `TooManyInterimResponses` and `InvalidRequest`.
+- **BREAKING**: Changed `rfc9112::read_headers::Http11HeadersReadError` to fail with `TooManyInterimResponses`.
+- **BREAKING**: Changed `HttpRequest::to_http_10_vec` and `HttpRequest::to_http_11_vec` to return a `Result`.
+
+  They fail with `HttpRequestError` on a method or a header name that is not a token, a header value holding CR, LF or NUL, and a `Transfer-Encoding` header.
+
+- Changed `rfc9112::read_headers::Http11HeadersRead` to skip up to 8 interim 1xx responses, 101 excepted.
 - Changed HTTP/1.0 responses to be kept alive only on the `keep-alive` connection option.
 
 ### Fixed
@@ -37,6 +51,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed event stream lines and events being buffered without bound.
 
   A server exceeding a limit now fails the parser, and ends `client::SseStream` with the error.
+
+- Fixed a method, a header name or a header value adding lines to the request.
+
+  `Http10Send` and `Http11Send` fail their first resume with `InvalidRequest`, before any write.
 
 - Fixed chunk data being accepted without its CRLF.
 - Fixed trailer fields being left unread after a chunked body.

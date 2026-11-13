@@ -300,7 +300,7 @@ impl HttpClientStd {
     pub fn send_streaming(self, request: HttpRequest) -> Result<SseStream, HttpClientError> {
         let HttpClientStd { mut stream } = self;
 
-        let req_bytes = request.to_http_11_vec();
+        let req_bytes = request.to_http_11_vec().map_err(Http11SendError::from)?;
         stream.write_all(&req_bytes)?;
 
         let mut read_headers = Http11HeadersRead::default();

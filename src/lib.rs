@@ -31,7 +31,8 @@
 //! bearer and basic authorization header helpers, with secrets
 //! redacted from debug output; [`rfc8615`] wraps the HTTP/1.1 send
 //! coroutine into a well-known URI discovery coroutine surfacing the
-//! redirect target.
+//! redirect target; [`rfc3986`] builds a URL from path segments, each
+//! encoded on its own and dot segments refused.
 //!
 //! Two modules span the RFC modules and therefore live at the crate
 //! root: [`coroutine`] defines the coroutine contract every state
@@ -74,6 +75,7 @@ extern crate std;
 pub mod client;
 pub mod coroutine;
 pub mod rfc1945;
+pub mod rfc3986;
 pub mod rfc6750;
 pub mod rfc7617;
 pub mod rfc8615;

@@ -65,7 +65,7 @@ use crate::{
     coroutine::*,
     rfc9110::{
         headers::HTTP_LOCATION,
-        request::HttpRequest,
+        request::{HttpRequest, HttpRequestError},
         response::HttpResponse,
         send::{HTTP_DEFAULT_MAX_BODY_LEN, HttpSendOutput, HttpSendYield},
     },
@@ -92,6 +92,12 @@ pub enum Http10SendError {
     /// The response body exceeds [`Http10Send::max_body_len`].
     #[error("HTTP/1.0 send failed: response body exceeds {0} bytes")]
     BodyTooLarge(usize),
+    /// The server sent too many interim responses.
+    #[error("HTTP/1.0 send failed: more than {0} interim responses")]
+    TooManyInterimResponses(usize),
+    /// The request cannot be serialised, nothing was written.
+    #[error("HTTP/1.0 send failed: {0}")]
+    InvalidRequest(#[from] HttpRequestError),
 }
 
 impl From<Http11HeadersReadError> for Http10SendError {
@@ -100,6 +106,9 @@ impl From<Http11HeadersReadError> for Http10SendError {
             Http11HeadersReadError::Eof => Self::Eof,
             Http11HeadersReadError::ParseResponseHeaders(e) => Self::ParseResponseHeaders(e),
             Http11HeadersReadError::TooLarge(limit) => Self::HeadersTooLarge(limit),
+            Http11HeadersReadError::TooManyInterimResponses(limit) => {
+                Self::TooManyInterimResponses(limit)
+            }
         }
     }
 }
@@ -125,22 +134,30 @@ pub struct Http10Send {
 
 impl Http10Send {
     /// Creates a new coroutine that will send the given request and
-    /// receive its response.
+    /// receive its response. A request that cannot be serialised fails
+    /// the first resume with [`Http10SendError::InvalidRequest`].
     pub fn new(req: HttpRequest) -> Self {
         debug!("prepare request to send");
         trace!("{req:?}");
 
         let request_url = req.url.clone();
         let is_head = req.method == "HEAD";
-        let bytes = req.to_http_10_vec();
+
+        let (state, wants_write) = match req.to_http_10_vec() {
+            Ok(bytes) => (
+                State::ReadHeaders(Http11HeadersRead::default()),
+                Some(bytes),
+            ),
+            Err(err) => (State::InvalidRequest(err), None),
+        };
 
         Self {
             max_headers_len: HTTP_DEFAULT_MAX_HEADERS_LEN,
             max_body_len: HTTP_DEFAULT_MAX_BODY_LEN,
             request_url,
             is_head,
-            state: State::ReadHeaders(Http11HeadersRead::default()),
-            wants_write: Some(bytes),
+            state,
+            wants_write,
             keep_alive: false,
             response: None,
             buf: Vec::new(),
@@ -194,6 +211,9 @@ impl HttpCoroutine for Http10Send {
             }
 
             match &mut self.state {
+                State::InvalidRequest(err) => {
+                    return HttpCoroutineState::Complete(Err(err.clone().into()));
+                }
                 State::ReadHeaders(rh) => match rh.resume(arg.take()) {
                     HttpCoroutineState::Yielded(HttpYield::WantsRead) => {
                         return HttpCoroutineState::Yielded(HttpSendYield::WantsRead);
@@ -296,6 +316,7 @@ impl HttpCoroutine for Http10Send {
 
 #[derive(Debug)]
 enum State {
+    InvalidRequest(HttpRequestError),
     ReadHeaders(Http11HeadersRead),
     BodyLength(usize),
     BodyEof,

@@ -9,14 +9,18 @@ use crate::{
     rfc9110::{
         chars::{CRLF, CRLF_CRLF, SP},
         headers::HTTP_CONTENT_LENGTH,
-        request::HttpRequest,
+        request::{HttpRequest, HttpRequestError},
     },
 };
 
 impl HttpRequest {
     /// Serialises this request as an HTTP/1.0 message; `Content-Length` is
-    /// regenerated from the body and any existing copy is dropped.
-    pub fn to_http_10_vec(&self) -> Vec<u8> {
+    /// regenerated from the body and any existing copy is dropped. Fails
+    /// on a method, a header name or a header value that would add a
+    /// line to the message.
+    pub fn to_http_10_vec(&self) -> Result<Vec<u8>, HttpRequestError> {
+        self.validate()?;
+
         let mut bytes = Vec::new();
 
         bytes.extend(self.method.as_bytes());
@@ -50,6 +54,6 @@ impl HttpRequest {
         bytes.extend(CRLF_CRLF);
         bytes.extend(&self.body);
 
-        bytes
+        Ok(bytes)
     }
 }

@@ -5,12 +5,16 @@
 
 use io_http::{
     coroutine::*,
-    rfc9110::{request::HttpRequest, send::*},
+    rfc9110::{
+        request::{HttpRequest, HttpRequestError},
+        send::*,
+    },
     rfc9112::{
-        chunk::{HTTP11_MAX_CHUNK_LINE_LEN, Http11ChunksRead, Http11ChunksReadError},
+        chunk::{Http11ChunksRead, Http11ChunksReadError},
         chunk_stream::{
             Http11ChunksReadStream, Http11ChunksReadStreamError, Http11ChunksReadStreamYield,
         },
+        read_headers::HTTP11_MAX_INTERIM_RESPONSES,
         send::{Http11Send, Http11SendError},
     },
 };
@@ -489,23 +493,41 @@ fn err_on_chunk_data_without_crlf() {
 }
 
 #[test]
-fn err_on_trailer_line_over_limit() {
-    let mut encoded = b"0\r\n".to_vec();
-    encoded.resize(encoded.len() + HTTP11_MAX_CHUNK_LINE_LEN + 2, b'a');
+fn chunks_trailers_at_limit() {
+    let mut chunks = Http11ChunksRead::default();
+    chunks.max_trailers_len = 8;
 
-    match Http11ChunksRead::default().resume(Some(&encoded)) {
-        HttpCoroutineState::Complete(Err(Http11ChunksReadError::TrailerLineTooLarge(_))) => {}
-        other => panic!("expected TrailerLineTooLarge, got: {other:?}"),
+    match chunks.resume(Some(b"0\r\nX-T: 1\r\nX:\r\n\r\n")) {
+        HttpCoroutineState::Complete(Ok(out)) => assert!(out.remaining.is_empty()),
+        other => panic!("unexpected result: {other:?}"),
     }
 
-    let (_, end) = test_chunk_stream(&encoded);
-    assert!(
-        matches!(
-            end,
-            Err(Http11ChunksReadStreamError::TrailerLineTooLarge(_))
-        ),
-        "got {end:?}"
-    );
+    let mut chunks = Http11ChunksReadStream::default();
+    chunks.max_trailers_len = 8;
+
+    match chunks.resume(Some(b"0\r\nX-T: 1\r\nX:\r\n\r\n")) {
+        HttpCoroutineState::Complete(Ok(remaining)) => assert!(remaining.is_empty()),
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
+#[test]
+fn err_on_trailers_over_limit() {
+    let mut chunks = Http11ChunksRead::default();
+    chunks.max_trailers_len = 8;
+
+    match chunks.resume(Some(b"0\r\nX-T: 1\r\nX:2\r\n\r\n")) {
+        HttpCoroutineState::Complete(Err(Http11ChunksReadError::TrailersTooLarge(8))) => {}
+        other => panic!("expected TrailersTooLarge, got: {other:?}"),
+    }
+
+    let mut chunks = Http11ChunksReadStream::default();
+    chunks.max_trailers_len = 8;
+
+    match chunks.resume(Some(b"0\r\nX-T: 1\r\nX:2\r\n\r\n")) {
+        HttpCoroutineState::Complete(Err(Http11ChunksReadStreamError::TrailersTooLarge(8))) => {}
+        other => panic!("expected TrailersTooLarge, got: {other:?}"),
+    }
 }
 
 /// Feeds `encoded` once to the streaming decoder, then reports EOF.
@@ -624,6 +646,179 @@ fn switching_protocols_ends_at_head() {
             assert_eq!(out.remaining, b"RAW");
         }
         other => panic!("unexpected result: {other:?}"),
+    }
+}
+
+#[test]
+fn err_on_endless_interim_responses() {
+    let mut send = new_send();
+    let mut arg: Option<&[u8]> = None;
+
+    for _ in 0..1000 {
+        match send.resume(arg.take()) {
+            HttpCoroutineState::Yielded(HttpSendYield::WantsWrite(_)) => {}
+            HttpCoroutineState::Yielded(HttpSendYield::WantsRead) => {
+                arg = Some(b"HTTP/1.1 102 Processing\r\n\r\n")
+            }
+            HttpCoroutineState::Complete(Err(Http11SendError::TooManyInterimResponses(
+                HTTP11_MAX_INTERIM_RESPONSES,
+            ))) => return,
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    panic!("still reading after 1000 interim responses");
+}
+
+#[test]
+fn interim_responses_at_limit() {
+    let mut response = b"HTTP/1.1 102 Processing\r\n\r\n".repeat(HTTP11_MAX_INTERIM_RESPONSES);
+    response.extend(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+
+    match test_once(new_send(), &response) {
+        HttpCoroutineState::Complete(Ok(out)) => assert_eq!(out.response.body, b"ok"),
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
+#[test]
+fn err_on_endless_trailers() {
+    let mut send = new_send();
+    let mut arg: Option<&[u8]> = None;
+    let mut head = Some(&b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n"[..]);
+
+    for _ in 0..10_000 {
+        match send.resume(arg.take()) {
+            HttpCoroutineState::Yielded(HttpSendYield::WantsWrite(_)) => {}
+            HttpCoroutineState::Yielded(HttpSendYield::WantsRead) => {
+                arg = Some(head.take().unwrap_or(b"X-Trailer: 0123456789abcdef\r\n"))
+            }
+            HttpCoroutineState::Complete(Err(Http11SendError::ReadChunks(
+                Http11ChunksReadError::TrailersTooLarge(_),
+            ))) => return,
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    panic!("still reading after 10000 trailer fields");
+}
+
+#[test]
+fn err_on_endless_chunk_stream_trailers() {
+    let mut chunks = Http11ChunksReadStream::default();
+    let mut arg = Some(&b"0\r\n"[..]);
+
+    for _ in 0..10_000 {
+        match chunks.resume(arg.take()) {
+            HttpCoroutineState::Yielded(Http11ChunksReadStreamYield::WantsRead) => {
+                arg = Some(b"X-Trailer: 0123456789abcdef\r\n")
+            }
+            HttpCoroutineState::Complete(Err(Http11ChunksReadStreamError::TrailersTooLarge(_))) => {
+                return;
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    panic!("still reading after 10000 trailer fields");
+}
+
+#[test]
+fn body_content_length_on_lone_identity_transfer_coding() {
+    let response =
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: Identity\r\nContent-Length: 5\r\n\r\nhello";
+
+    match test_once(new_send(), response) {
+        HttpCoroutineState::Complete(Ok(out)) => {
+            assert_eq!(out.response.body, b"hello");
+            assert!(out.keep_alive);
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
+/// Starts the exchange of a request whose head is under test.
+fn test_request(method: &str, headers: &[(&str, &str)]) -> Step {
+    let url = Url::parse("http://example.com/").unwrap();
+    let mut request = HttpRequest::get(url);
+    request.method = method.into();
+
+    for (name, value) in headers {
+        request = request.header(name, value);
+    }
+
+    Http11Send::new(request).resume(None)
+}
+
+#[test]
+fn err_on_header_value_with_line_break_or_nul() {
+    for value in ["1\r\nX-Injected: 2", "1\nX-Injected: 2", "1\rX", "1\0"] {
+        match test_request("GET", &[("X-A", value)]) {
+            HttpCoroutineState::Complete(Err(Http11SendError::InvalidRequest(
+                HttpRequestError::InvalidHeaderValue(name),
+            ))) => assert_eq!(name, "X-A"),
+            other => panic!("expected InvalidHeaderValue for {value:?}, got: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn err_on_header_name_not_token() {
+    for name in ["", "X A", "X-A:", "X-A\r\nX-Injected", "X-\u{e9}"] {
+        match test_request("GET", &[(name, "1")]) {
+            HttpCoroutineState::Complete(Err(Http11SendError::InvalidRequest(
+                HttpRequestError::InvalidHeaderName(got),
+            ))) => assert_eq!(got, name),
+            other => panic!("expected InvalidHeaderName for {name:?}, got: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn err_on_method_not_token() {
+    for method in ["", "GET /x HTTP/1.1\r\nX-Injected: 2\r\n\r\nGET", "G ET"] {
+        match test_request(method, &[]) {
+            HttpCoroutineState::Complete(Err(Http11SendError::InvalidRequest(
+                HttpRequestError::InvalidMethod(got),
+            ))) => assert_eq!(got, method),
+            other => panic!("expected InvalidMethod for {method:?}, got: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn err_on_request_transfer_encoding() {
+    match test_request("POST", &[("Transfer-Encoding", "chunked")]) {
+        HttpCoroutineState::Complete(Err(Http11SendError::InvalidRequest(
+            HttpRequestError::UnsupportedTransferEncoding,
+        ))) => {}
+        other => panic!("expected UnsupportedTransferEncoding, got: {other:?}"),
+    }
+}
+
+#[test]
+fn request_head_of_tokens_is_written() {
+    let headers = [("X-!#$%&'*+-.^_`|~9", "a\tb \u{e9}"), ("Empty", "")];
+
+    match test_request("M-SEARCH", &headers) {
+        HttpCoroutineState::Yielded(HttpSendYield::WantsWrite(bytes)) => {
+            let head = String::from_utf8(bytes).unwrap();
+            assert!(head.starts_with("M-SEARCH / HTTP/1.1\r\n"));
+            assert!(head.contains("\r\nX-!#$%&'*+-.^_`|~9: a\tb \u{e9}\r\nEmpty: \r\n"));
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
+#[test]
+fn err_on_final_transfer_coding_identity_after_another() {
+    let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked, identity\r\n\r\nhello";
+
+    match test_once(new_send(), response) {
+        HttpCoroutineState::Complete(Err(Http11SendError::UnsupportedTransferCoding(coding))) => {
+            assert_eq!(coding, "identity")
+        }
+        other => panic!("expected UnsupportedTransferCoding, got: {other:?}"),
     }
 }
 

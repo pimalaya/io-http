@@ -33,6 +33,10 @@ pub enum Http11HeadersReadError {
     /// The response head exceeds [`Http11HeadersRead::max_len`].
     #[error("HTTP/1.X read headers failed: response head exceeds {0} bytes")]
     TooLarge(usize),
+    /// The server sent over [`HTTP11_MAX_INTERIM_RESPONSES`] interim
+    /// responses.
+    #[error("HTTP/1.X read headers failed: more than {0} interim responses")]
+    TooManyInterimResponses(usize),
 }
 
 /// Terminal output of [`Http11HeadersRead`]; the response body is
@@ -50,6 +54,10 @@ pub struct Http11HeadersReadOutput {
 /// Default value of [`Http11HeadersRead::max_len`]: 64 KiB.
 pub const HTTP_DEFAULT_MAX_HEADERS_LEN: usize = 64 * 1024;
 
+/// Maximum number of interim 1xx responses skipped before the final
+/// one: 8.
+pub const HTTP11_MAX_INTERIM_RESPONSES: usize = 8;
+
 /// I/O-free coroutine to read and parse an HTTP/1.X response head.
 /// Interim 1xx responses are skipped, except 101.
 #[derive(Debug)]
@@ -63,6 +71,8 @@ pub struct Http11HeadersRead {
     buf: Vec<u8>,
     /// How many headers the next parse has room for.
     headers_cap: usize,
+    /// How many interim responses were skipped.
+    interim: usize,
 }
 
 impl Default for Http11HeadersRead {
@@ -71,6 +81,7 @@ impl Default for Http11HeadersRead {
             max_len: HTTP_DEFAULT_MAX_HEADERS_LEN,
             buf: Vec::new(),
             headers_cap: 64,
+            interim: 0,
         }
     }
 }
@@ -118,7 +129,14 @@ impl HttpCoroutine for Http11HeadersRead {
 
             // NOTE: 101 switches protocols, which makes it a final response
             if status.is_some_and(|status| status.is_informational() && *status != 101) {
+                if self.interim == HTTP11_MAX_INTERIM_RESPONSES {
+                    let limit = HTTP11_MAX_INTERIM_RESPONSES;
+                    let err = Http11HeadersReadError::TooManyInterimResponses(limit);
+                    return HttpCoroutineState::Complete(Err(err));
+                }
+
                 debug!("skip interim response");
+                self.interim += 1;
                 self.buf.drain(..header_end);
                 continue;
             }

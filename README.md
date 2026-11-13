@@ -37,6 +37,7 @@ This library is composed of 3 feature-gated layers:
 | RFC    | What is covered                                                                                      |
 |--------|------------------------------------------------------------------------------------------------------|
 | [1945] | HTTP/1.0: send a request and receive its response, connections closing after each exchange by default |
+| [3986] | URL building: append path segments to a base, each encoded on its own, dot segments refused           |
 | [6750] | Bearer authentication: carry an OAuth 2.0 access token in the authorization header                    |
 | [7617] | Basic authentication: carry a base64-encoded username and password pair in the authorization header   |
 | [8615] | Well-known discovery: probe the reserved well-known path of an origin and surface the redirect target |
@@ -45,6 +46,7 @@ This library is composed of 3 feature-gated layers:
 | [SSE]  | Server-sent events (WHATWG HTML Living Standard): decode an event stream one event at a time          |
 
 [1945]: https://www.rfc-editor.org/rfc/rfc1945
+[3986]: https://www.rfc-editor.org/rfc/rfc3986
 [6750]: https://www.rfc-editor.org/rfc/rfc6750
 [7617]: https://www.rfc-editor.org/rfc/rfc7617
 [8615]: https://www.rfc-editor.org/rfc/rfc8615

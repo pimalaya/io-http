@@ -9,9 +9,28 @@ use alloc::{
     vec::Vec,
 };
 
+use thiserror::Error;
 use url::Url;
 
-use crate::rfc9110::headers::HTTP_SENSITIVE_HEADERS;
+use crate::rfc9110::headers::{HTTP_SENSITIVE_HEADERS, HTTP_TRANSFER_ENCODING};
+
+/// Failure causes when serialising an [`HttpRequest`].
+#[derive(Clone, Debug, Eq, PartialEq, Error)]
+pub enum HttpRequestError {
+    /// The method is not a token.
+    #[error("HTTP serialize request failed: invalid method {0:?}")]
+    InvalidMethod(String),
+    /// A header name is not a token.
+    #[error("HTTP serialize request failed: invalid header name {0:?}")]
+    InvalidHeaderName(String),
+    /// The value of the named header holds a CR, a LF or a NUL.
+    #[error("HTTP serialize request failed: invalid value for header `{0}`")]
+    InvalidHeaderValue(String),
+    /// The request sets a transfer encoding, when its body is always
+    /// sent with its content length.
+    #[error("HTTP serialize request failed: transfer encoding not supported")]
+    UnsupportedTransferEncoding,
+}
 
 /// An outgoing HTTP request.
 #[derive(Clone)]
@@ -50,6 +69,35 @@ impl HttpRequest {
         self.body = body;
         self
     }
+
+    /// Checks that nothing in the head can add a line to the message:
+    /// method and header names are tokens, values hold no line break.
+    ///
+    /// Refs: <https://www.rfc-editor.org/rfc/rfc9110#section-5.5>
+    pub(crate) fn validate(&self) -> Result<(), HttpRequestError> {
+        if !is_token(&self.method) {
+            return Err(HttpRequestError::InvalidMethod(self.method.clone()));
+        }
+
+        for (name, value) in &self.headers {
+            if !is_token(name) {
+                return Err(HttpRequestError::InvalidHeaderName(name.clone()));
+            }
+
+            if value
+                .bytes()
+                .any(|b| (b == b'\r') | (b == b'\n') | (b == 0))
+            {
+                return Err(HttpRequestError::InvalidHeaderValue(name.clone()));
+            }
+
+            if name.eq_ignore_ascii_case(HTTP_TRANSFER_ENCODING) {
+                return Err(HttpRequestError::UnsupportedTransferEncoding);
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl fmt::Debug for HttpRequest {
@@ -73,6 +121,14 @@ impl fmt::Debug for HttpRequest {
             .field("body", &format_args!("[{} bytes]", self.body.len()))
             .finish()
     }
+}
+
+/// Whether `s` is a token.
+///
+/// Refs: <https://www.rfc-editor.org/rfc/rfc9110#section-5.6.2>
+fn is_token(s: &str) -> bool {
+    let is_tchar = |b: u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b);
+    !s.is_empty() && s.bytes().all(is_tchar)
 }
 
 #[cfg(test)]

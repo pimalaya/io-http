@@ -12,8 +12,9 @@
 //! | Fixed-length | `Content-Length: <n>`                     |
 //! | Read-to-EOF  | Neither header present                    |
 //!
-//! Interim 1xx responses are skipped. Any other final transfer coding
-//! fails the exchange, and codings before `chunked` stay applied to the
+//! Interim 1xx responses are skipped. A lone `identity` transfer coding
+//! is ignored, any other final transfer coding fails the exchange, and
+//! codings before `chunked` stay applied to the
 //! body.
 //!
 //! # Example
@@ -76,7 +77,7 @@ use crate::{
     rfc1945::version::HTTP_10,
     rfc9110::{
         headers::{HTTP_LOCATION, HTTP_TRANSFER_ENCODING},
-        request::HttpRequest,
+        request::{HttpRequest, HttpRequestError},
         response::HttpResponse,
         send::{HTTP_DEFAULT_MAX_BODY_LEN, HttpSendOutput, HttpSendYield},
     },
@@ -110,6 +111,12 @@ pub enum Http11SendError {
     /// The response body exceeds [`Http11Send::max_body_len`].
     #[error("HTTP/1.1 send failed: response body exceeds {0} bytes")]
     BodyTooLarge(usize),
+    /// The server sent too many interim responses.
+    #[error("HTTP/1.1 send failed: more than {0} interim responses")]
+    TooManyInterimResponses(usize),
+    /// The request cannot be serialised, nothing was written.
+    #[error("HTTP/1.1 send failed: {0}")]
+    InvalidRequest(#[from] HttpRequestError),
 }
 
 impl From<Http11HeadersReadError> for Http11SendError {
@@ -118,12 +125,16 @@ impl From<Http11HeadersReadError> for Http11SendError {
             Http11HeadersReadError::Eof => Self::Eof,
             Http11HeadersReadError::ParseResponseHeaders(e) => Self::ParseResponseHeaders(e),
             Http11HeadersReadError::TooLarge(limit) => Self::HeadersTooLarge(limit),
+            Http11HeadersReadError::TooManyInterimResponses(limit) => {
+                Self::TooManyInterimResponses(limit)
+            }
         }
     }
 }
 
 #[derive(Debug)]
 enum State {
+    InvalidRequest(HttpRequestError),
     ReadHeaders(Http11HeadersRead),
     BodyChunks(Http11ChunksRead),
     BodyLength(usize),
@@ -133,7 +144,8 @@ enum State {
 /// I/O-free coroutine to send an HTTP/1.1 request and receive its response.
 #[derive(Debug)]
 pub struct Http11Send {
-    /// Maximum size in bytes of the response head. Defaults to
+    /// Maximum size in bytes of the response head, and of the trailer
+    /// section of a chunked body. Defaults to
     /// [`HTTP_DEFAULT_MAX_HEADERS_LEN`].
     pub max_headers_len: usize,
     /// Maximum size in bytes of the response body, whatever its
@@ -151,22 +163,30 @@ pub struct Http11Send {
 
 impl Http11Send {
     /// Creates a new coroutine that will send the given request and
-    /// receive its response.
+    /// receive its response. A request that cannot be serialised fails
+    /// the first resume with [`Http11SendError::InvalidRequest`].
     pub fn new(req: HttpRequest) -> Self {
         debug!("prepare request to send");
         trace!("{req:?}");
 
         let request_url = req.url.clone();
         let is_head = req.method == "HEAD";
-        let bytes = req.to_http_11_vec();
+
+        let (state, wants_write) = match req.to_http_11_vec() {
+            Ok(bytes) => (
+                State::ReadHeaders(Http11HeadersRead::default()),
+                Some(bytes),
+            ),
+            Err(err) => (State::InvalidRequest(err), None),
+        };
 
         Self {
             max_headers_len: HTTP_DEFAULT_MAX_HEADERS_LEN,
             max_body_len: HTTP_DEFAULT_MAX_BODY_LEN,
             request_url,
             is_head,
-            state: State::ReadHeaders(Http11HeadersRead::default()),
-            wants_write: Some(bytes),
+            state,
+            wants_write,
             is_conn_closed: false,
             response: None,
             buf: Vec::new(),
@@ -220,6 +240,9 @@ impl HttpCoroutine for Http11Send {
             }
 
             match &mut self.state {
+                State::InvalidRequest(err) => {
+                    return HttpCoroutineState::Complete(Err(err.clone().into()));
+                }
                 State::ReadHeaders(rh) => match rh.resume(arg.take()) {
                     HttpCoroutineState::Yielded(HttpYield::WantsRead) => {
                         return HttpCoroutineState::Yielded(HttpSendYield::WantsRead);
@@ -246,10 +269,18 @@ impl HttpCoroutine for Http11Send {
                         }
 
                         if !is_http10 {
-                            let coding = response
+                            let mut codings = response
                                 .header_list(HTTP_TRANSFER_ENCODING)
-                                .filter(|coding| !coding.is_empty())
-                                .last();
+                                .filter(|coding| !coding.is_empty());
+
+                            let first = codings.next();
+                            let more = codings.last();
+
+                            let coding = match (first, more) {
+                                // NOTE: obsolete no-op coding, still sent alone
+                                (Some(only), None) if only.eq_ignore_ascii_case("identity") => None,
+                                (first, more) => more.or(first),
+                            };
 
                             let chunked = match coding {
                                 None => false,
@@ -264,6 +295,7 @@ impl HttpCoroutine for Http11Send {
                             if chunked {
                                 let mut chunks = Http11ChunksRead::default();
                                 chunks.max_body_len = self.max_body_len;
+                                chunks.max_trailers_len = self.max_headers_len;
 
                                 // NOTE: an empty slice means EOF to the
                                 // decoder, so nothing pre-read is None.

@@ -17,6 +17,7 @@ use thiserror::Error;
 use crate::{
     coroutine::*,
     rfc9110::{chars::CRLF, send::HTTP_DEFAULT_MAX_BODY_LEN},
+    rfc9112::read_headers::HTTP_DEFAULT_MAX_HEADERS_LEN,
     scan::{crlf_position, position},
 };
 
@@ -42,9 +43,9 @@ pub enum Http11ChunksReadError {
     /// The chunk data is not followed by CRLF.
     #[error("HTTP/1.1 read chunks failed: chunk data not followed by CRLF")]
     InvalidChunkTerminator,
-    /// A trailer line exceeds [`HTTP11_MAX_CHUNK_LINE_LEN`].
-    #[error("HTTP/1.1 read chunks failed: trailer line exceeds {0} bytes")]
-    TrailerLineTooLarge(usize),
+    /// The trailer section exceeds [`Http11ChunksRead::max_trailers_len`].
+    #[error("HTTP/1.1 read chunks failed: trailers exceed {0} bytes")]
+    TrailersTooLarge(usize),
 }
 
 /// Terminal output of [`Http11ChunksRead`].
@@ -73,6 +74,11 @@ pub struct Http11ChunksRead {
     /// [`Http11ChunksReadError::BodyTooLarge`] before any of it is
     /// buffered. Defaults to [`HTTP_DEFAULT_MAX_BODY_LEN`].
     pub max_body_len: usize,
+    /// Maximum size in bytes of the trailer section, line ends
+    /// excluded. A server exceeding it fails the read with
+    /// [`Http11ChunksReadError::TrailersTooLarge`]. Defaults to
+    /// [`HTTP_DEFAULT_MAX_HEADERS_LEN`].
+    pub max_trailers_len: usize,
     state: State,
     wants_read: bool,
     last_chunk: bool,
@@ -80,18 +86,21 @@ pub struct Http11ChunksRead {
     /// Where the bytes not consumed yet start in `buf`.
     start: usize,
     body: Vec<u8>,
+    trailers_len: usize,
 }
 
 impl Default for Http11ChunksRead {
     fn default() -> Self {
         Self {
             max_body_len: HTTP_DEFAULT_MAX_BODY_LEN,
+            max_trailers_len: HTTP_DEFAULT_MAX_HEADERS_LEN,
             state: State::default(),
             wants_read: false,
             last_chunk: false,
             buf: Vec::new(),
             start: 0,
             body: Vec::new(),
+            trailers_len: 0,
         }
     }
 }
@@ -202,12 +211,14 @@ impl HttpCoroutine for Http11ChunksRead {
                     self.state = State::ChunkSize;
                 }
                 State::Trailers => {
-                    let line_window = rest.len().min(HTTP11_MAX_CHUNK_LINE_LEN + CRLF.len());
+                    let room = self.max_trailers_len.saturating_sub(self.trailers_len);
+                    let room = room.saturating_add(CRLF.len());
+                    let line_window = rest.len().min(room);
 
                     let Some(crlf) = crlf_position(&rest[..line_window]) else {
-                        if line_window == HTTP11_MAX_CHUNK_LINE_LEN + CRLF.len() {
-                            let limit = HTTP11_MAX_CHUNK_LINE_LEN;
-                            let err = Http11ChunksReadError::TrailerLineTooLarge(limit);
+                        if line_window == room {
+                            let limit = self.max_trailers_len;
+                            let err = Http11ChunksReadError::TrailersTooLarge(limit);
                             return HttpCoroutineState::Complete(Err(err));
                         }
 
@@ -216,6 +227,7 @@ impl HttpCoroutine for Http11ChunksRead {
                     };
 
                     self.start += crlf + CRLF.len();
+                    self.trailers_len += crlf;
 
                     if crlf == 0 {
                         self.last_chunk = true;

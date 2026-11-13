@@ -14,6 +14,7 @@ use std::{
 use io_http::{
     client::{HttpClientError, HttpClientStd, SseStream},
     rfc9110::request::HttpRequest,
+    rfc9112::send::Http11SendError,
     sse::frame::{SSE_DEFAULT_MAX_LINE_LEN, SseFrameParserError},
 };
 use url::Url;
@@ -109,6 +110,21 @@ fn skips_interim_response() {
 
     assert_eq!(*sse.response().status, 200);
     assert_eq!(sse.next_frame().unwrap().expect("frame").data, "one");
+}
+
+#[test]
+fn rejects_invalid_request_before_writing() {
+    let stream = MockStream::new(b"");
+    let client = HttpClientStd::new(stream.clone());
+    let request = request().header("X-A", "1\r\nX-Injected: 2");
+
+    match client.send_streaming(request) {
+        Err(HttpClientError::Http11Send(Http11SendError::InvalidRequest(_))) => {}
+        Err(err) => panic!("unexpected error: {err:?}"),
+        Ok(_) => panic!("expected InvalidRequest"),
+    }
+
+    assert!(stream.written().is_empty());
 }
 
 #[test]

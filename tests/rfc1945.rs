@@ -288,3 +288,46 @@ fn err_on_conflicting_content_length() {
         other => panic!("expected InvalidContentLength, got: {other:?}"),
     }
 }
+
+#[test]
+fn err_on_endless_interim_responses() {
+    let mut send = new_send();
+    let mut arg: Option<&[u8]> = None;
+
+    for _ in 0..1000 {
+        match send.resume(arg.take()) {
+            HttpCoroutineState::Yielded(HttpSendYield::WantsWrite(_)) => {}
+            HttpCoroutineState::Yielded(HttpSendYield::WantsRead) => {
+                arg = Some(b"HTTP/1.1 102 Processing\r\n\r\n")
+            }
+            HttpCoroutineState::Complete(Err(Http10SendError::TooManyInterimResponses(_))) => {
+                return;
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    panic!("still reading after 1000 interim responses");
+}
+
+#[test]
+fn err_on_request_head_not_valid() {
+    let url = Url::parse("http://example.com/").unwrap();
+
+    let mut request = HttpRequest::get(url.clone());
+    request.method = "GET /x HTTP/1.0\r\n\r\nGET".into();
+    let method = Http10Send::new(request).resume(None);
+
+    let request = HttpRequest::get(url.clone()).header("X-A\r\nX-Injected", "1");
+    let name = Http10Send::new(request).resume(None);
+
+    let request = HttpRequest::get(url).header("X-A", "1\r\nX-Injected: 2");
+    let value = Http10Send::new(request).resume(None);
+
+    for step in [method, name, value] {
+        match step {
+            HttpCoroutineState::Complete(Err(Http10SendError::InvalidRequest(_))) => {}
+            other => panic!("expected InvalidRequest, got: {other:?}"),
+        }
+    }
+}
