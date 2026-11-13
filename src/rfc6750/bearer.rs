@@ -32,6 +32,13 @@ pub enum HttpAuthBearerError {
 }
 
 /// OAuth 2.0 Bearer token; redacted in [`fmt::Debug`], zeroed on drop.
+///
+/// It has no [`fmt::Display`], so that no message prints the token:
+///
+/// ```compile_fail
+/// let token = io_http::rfc6750::bearer::HttpAuthBearer::new("abc123");
+/// println!("{token}");
+/// ```
 #[derive(Clone)]
 pub struct HttpAuthBearer(SecretString);
 
@@ -69,12 +76,6 @@ impl fmt::Debug for HttpAuthBearer {
     }
 }
 
-impl fmt::Display for HttpAuthBearer {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.0.expose_secret())
-    }
-}
-
 impl PartialEq for HttpAuthBearer {
     fn eq(&self, other: &Self) -> bool {
         self.0.expose_secret() == other.0.expose_secret()
@@ -85,7 +86,7 @@ impl Eq for HttpAuthBearer {}
 
 #[cfg(test)]
 mod tests {
-    use alloc::{format, string::ToString};
+    use alloc::format;
 
     use secrecy::ExposeSecret;
 
@@ -124,12 +125,6 @@ mod tests {
         let value = "Bearer header.payload.signature";
         let token = HttpAuthBearer::from_authorization(value).unwrap();
         assert_eq!(token.expose_secret(), "header.payload.signature");
-    }
-
-    #[test]
-    fn display_yields_token_string() {
-        let token = HttpAuthBearer::new("abc123");
-        assert_eq!(token.to_string(), "abc123");
     }
 
     #[test]

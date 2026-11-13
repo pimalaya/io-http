@@ -3,9 +3,10 @@
 //! Parses `WWW-Authenticate` (and `Proxy-Authenticate`) header values
 //! into their challenge list: each challenge names a scheme and
 //! carries auth parameters. Challenges and their parameters share the
-//! comma separator, so an element counts as a new challenge when it
-//! does not read as a `name=value` parameter of the current one;
-//! `token68` blobs are recognized and skipped.
+//! comma separator, so each element is told apart by its first token:
+//! followed by `=`, blanks allowed, it is a parameter of the current
+//! challenge, otherwise the scheme of a new one. `token68` blobs are
+//! recognized and skipped.
 //!
 //! [RFC 9110 §11.6.1]: https://www.rfc-editor.org/rfc/rfc9110#section-11.6.1
 
@@ -39,29 +40,19 @@ impl HttpChallenge {
                 continue;
             }
 
-            match element.split_once(|c: char| c.is_ascii_whitespace()) {
-                // NOTE: a scheme followed by its first parameter or a
-                // token68 blob starts a new challenge.
-                Some((scheme, rest)) => {
-                    challenges.push(HttpChallenge {
-                        scheme: scheme.to_ascii_lowercase(),
-                        params: Vec::new(),
-                    });
-                    push_param(&mut challenges, rest.trim_start());
-                }
-                // NOTE: a lone element is a parameter of the current
-                // challenge when it reads as `name=value`, a new bare
-                // challenge otherwise.
-                None => {
-                    if element.contains('=') {
-                        push_param(&mut challenges, element);
-                    } else {
-                        challenges.push(HttpChallenge {
-                            scheme: element.to_ascii_lowercase(),
-                            params: Vec::new(),
-                        });
-                    }
-                }
+            let is_token_end = |c: char| c.is_ascii_whitespace() || c == '=';
+            let token_end = element.find(is_token_end).unwrap_or(element.len());
+            let (token, rest) = element.split_at(token_end);
+            let rest = rest.trim_start();
+
+            if rest.starts_with('=') {
+                push_param(&mut challenges, element);
+            } else {
+                challenges.push(HttpChallenge {
+                    scheme: token.to_ascii_lowercase(),
+                    params: Vec::new(),
+                });
+                push_param(&mut challenges, rest);
             }
         }
 
@@ -217,6 +208,35 @@ mod tests {
         assert_eq!(challenges.len(), 2);
         assert_eq!(challenges[0].scheme, "negotiate");
         assert!(challenges[0].params.is_empty());
+        assert_eq!(challenges[1].param("realm"), Some("dav"));
+    }
+
+    #[test]
+    fn quoted_space_past_first_parameter_stays_in_challenge() {
+        let challenges = HttpChallenge::parse_all(
+            r#"Bearer realm="example", error="invalid_token", error_description="The access token expired""#,
+        );
+
+        assert_eq!(challenges.len(), 1, "got {challenges:?}");
+        assert_eq!(challenges[0].scheme, "bearer");
+        assert_eq!(challenges[0].param("realm"), Some("example"));
+        assert_eq!(challenges[0].param("error"), Some("invalid_token"));
+        assert_eq!(
+            challenges[0].param("error_description"),
+            Some("The access token expired"),
+        );
+    }
+
+    #[test]
+    fn blanks_around_equal_sign_stay_in_challenge() {
+        let challenges = HttpChallenge::parse_all(
+            "Bearer realm = \"a b\", scope\t=\t\"openid profile\", Basic realm = dav",
+        );
+
+        assert_eq!(challenges.len(), 2, "got {challenges:?}");
+        assert_eq!(challenges[0].param("realm"), Some("a b"));
+        assert_eq!(challenges[0].param("scope"), Some("openid profile"));
+        assert_eq!(challenges[1].scheme, "basic");
         assert_eq!(challenges[1].param("realm"), Some("dav"));
     }
 

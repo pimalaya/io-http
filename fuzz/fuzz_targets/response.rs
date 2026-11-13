@@ -5,7 +5,8 @@
 //! the streaming chunk decoder and the event stream parser answer or
 //! fail, never panic, never spin on EOF, never return more than the
 //! limits they were given, and return the same thing whether the bytes
-//! come split or whole.
+//! come split or whole. The challenge parser never panics and never
+//! returns a nameless scheme or parameter.
 
 use std::fmt::Display;
 
@@ -13,7 +14,7 @@ use arbitrary::Arbitrary;
 use io_http::{
     coroutine::*,
     rfc1945::send::Http10Send,
-    rfc9110::{request::HttpRequest, send::*},
+    rfc9110::{challenge::HttpChallenge, request::HttpRequest, send::*},
     rfc9112::{
         chunk_stream::{Http11ChunksReadStream, Http11ChunksReadStreamYield},
         send::Http11Send,
@@ -80,6 +81,16 @@ fuzz_target!(|input: Input| {
 
     let events = |reads: &[&[u8]]| parse_events(reads, max_headers_len, max_body_len);
     assert_eq!(events(&split), events(&whole));
+
+    for read in &split {
+        for challenge in HttpChallenge::parse_all(&String::from_utf8_lossy(read)) {
+            let is_token_end = |c: char| c.is_ascii_whitespace() || c == '=';
+
+            assert!(!challenge.scheme.is_empty());
+            assert!(!challenge.scheme.contains(is_token_end));
+            assert!(challenge.params.iter().all(|(name, _)| !name.is_empty()));
+        }
+    }
 });
 
 fn check_send<C, E>(mut send: C, reads: &[&[u8]], max_body_len: usize) -> Exchange

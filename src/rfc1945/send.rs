@@ -255,6 +255,12 @@ impl HttpCoroutine for Http10Send {
                             self.buf = out.remaining;
                             self.response = Some(response);
                             debug!("reading body of length {len}");
+
+                            // NOTE: one block for the body, growth as
+                            // usual when the allocator refuses it
+                            let missing = len.saturating_sub(self.buf.len());
+                            let _ = self.buf.try_reserve_exact(missing);
+
                             self.state = State::BodyLength(len);
                             continue;
                         }
@@ -280,8 +286,8 @@ impl HttpCoroutine for Http10Send {
                         return HttpCoroutineState::Yielded(HttpSendYield::WantsRead);
                     }
 
-                    let body = self.buf.drain(..*len).collect();
-                    let remaining = mem::take(&mut self.buf);
+                    let remaining = self.buf.split_off(*len);
+                    let body = mem::take(&mut self.buf);
                     let mut response = self.response.take().expect("response missing");
                     response.body = body;
                     return self.finish(response, remaining);

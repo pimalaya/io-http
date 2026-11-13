@@ -900,9 +900,10 @@ fn head_with_more_than_64_headers() {
     }
 }
 
-/// Runs an exchange over `reads` then EOF. The bytes left past the
-/// response are kept out, they depend on where the reads stop.
-fn outcome(reads: &[&[u8]]) -> String {
+/// Runs an exchange over `reads` then EOF, returns how it ended and the
+/// body. The bytes left past the response are kept out, they depend on
+/// where the reads stop.
+fn outcome(reads: &[&[u8]]) -> (String, Vec<u8>) {
     let mut send = new_send();
     let mut reads = reads.iter();
     let mut eofs = 0;
@@ -924,11 +925,15 @@ fn outcome(reads: &[&[u8]]) -> String {
                 response,
                 keep_alive,
                 same_origin,
-            }) => return format!("redirect {url} {response:?} {keep_alive} {same_origin}"),
-            HttpCoroutineState::Complete(Ok(out)) => {
-                return format!("ok {:?} {}", out.response, out.keep_alive);
+            }) => {
+                let end = format!("redirect {url} {response:?} {keep_alive} {same_origin}");
+                return (end, response.body);
             }
-            HttpCoroutineState::Complete(Err(err)) => return format!("err {err}"),
+            HttpCoroutineState::Complete(Ok(out)) => {
+                let end = format!("ok {:?} {}", out.response, out.keep_alive);
+                return (end, out.response.body);
+            }
+            HttpCoroutineState::Complete(Err(err)) => return (format!("err {err}"), Vec::new()),
         }
     }
 }

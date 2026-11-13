@@ -14,6 +14,7 @@ use crate::{
     coroutine::*,
     rfc1945::version::HTTP_10,
     rfc9110::{
+        chars::{CR, LF},
         headers::HTTP_CONNECTION,
         response::{HttpResponse, HttpResponseBuilder},
         status::HttpStatusCode,
@@ -73,6 +74,12 @@ pub struct Http11HeadersRead {
     headers_cap: usize,
     /// How many interim responses were skipped.
     interim: usize,
+    /// How many bytes of `buf` were searched for the end of the head.
+    scanned: usize,
+    /// Whether the head started, past the empty lines that may lead it.
+    started: bool,
+    /// How many bytes of `buf` the last parse was given.
+    parsed_len: usize,
 }
 
 impl Default for Http11HeadersRead {
@@ -82,6 +89,9 @@ impl Default for Http11HeadersRead {
             buf: Vec::new(),
             headers_cap: 64,
             interim: 0,
+            scanned: 0,
+            started: false,
+            parsed_len: 0,
         }
     }
 }
@@ -91,16 +101,39 @@ impl HttpCoroutine for Http11HeadersRead {
     type Return = Result<Http11HeadersReadOutput, Http11HeadersReadError>;
 
     fn resume(&mut self, arg: Option<&[u8]>) -> HttpCoroutineState<Self::Yield, Self::Return> {
-        match arg {
-            Some(&[]) => {
-                return HttpCoroutineState::Complete(Err(Http11HeadersReadError::Eof));
-            }
-            Some(data) => self.buf.extend_from_slice(data),
-            None => {}
+        let eof = matches!(arg, Some(&[]));
+
+        if let Some(data) = arg {
+            self.buf.extend_from_slice(data);
         }
 
         loop {
             let window = &self.buf[..self.buf.len().min(self.max_len)];
+            let mut ended = false;
+
+            for (i, &b) in window.iter().enumerate().skip(self.scanned) {
+                if b != CR && b != LF {
+                    self.started = true;
+                } else if b == LF && self.started {
+                    let line = &window[..i];
+                    ended |= line.ends_with(b"\n") || line.ends_with(b"\n\r");
+                }
+            }
+
+            self.scanned = window.len();
+
+            // NOTE: parsed when the head ends or cannot grow, and each
+            // time it doubles, to fail early on a peer that is not HTTP
+            let cut = eof || self.buf.len() > self.max_len;
+            let doubled = window.len() >= self.parsed_len.saturating_mul(2);
+
+            if !ended && !cut && !doubled {
+                trace!("received incomplete headers");
+                return HttpCoroutineState::Yielded(HttpYield::WantsRead);
+            }
+
+            self.parsed_len = window.len();
+
             let mut headers = vec![EMPTY_HEADER; self.headers_cap];
             let mut parsed = Response::new(&mut headers);
 
@@ -110,12 +143,16 @@ impl HttpCoroutine for Http11HeadersRead {
                     let err = Http11HeadersReadError::TooLarge(self.max_len);
                     return HttpCoroutineState::Complete(Err(err));
                 }
+                Ok(Status::Partial) if eof => {
+                    return HttpCoroutineState::Complete(Err(Http11HeadersReadError::Eof));
+                }
                 Ok(Status::Partial) => {
                     trace!("received incomplete headers");
                     return HttpCoroutineState::Yielded(HttpYield::WantsRead);
                 }
                 Err(HttparseError::TooManyHeaders) => {
                     self.headers_cap *= 2;
+                    self.parsed_len = 0;
                     continue;
                 }
                 Err(err) => {
@@ -138,6 +175,9 @@ impl HttpCoroutine for Http11HeadersRead {
                 debug!("skip interim response");
                 self.interim += 1;
                 self.buf.drain(..header_end);
+                self.scanned = 0;
+                self.started = false;
+                self.parsed_len = 0;
                 continue;
             }
 
@@ -149,11 +189,11 @@ impl HttpCoroutine for Http11HeadersRead {
                 builder.header(header.name, header.value);
             }
 
-            debug!("received complete headers");
-            trace!("{builder:?}");
-
             let response = builder.build(Vec::new());
             let remaining = self.buf.split_off(header_end);
+
+            debug!("received complete headers");
+            trace!("{response:?}");
 
             let has_option = |option: &str| {
                 response

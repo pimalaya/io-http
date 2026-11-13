@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `sse::frame::SseFrameParserError`.
 - Added the event stream parser to the `response` fuzz target.
 - Added a split against whole comparison to the `response` fuzz target.
+- Added the challenge parser to the `response` fuzz target.
 - Added `rfc9110::status::HttpStatusCode::is_informational`.
 - Added `rfc9110::request::HttpRequestError`.
 - Added `rfc3986::path::http_url_build`.
@@ -45,8 +46,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Changed `rfc9112::read_headers::Http11HeadersRead` to skip up to 8 interim 1xx responses, 101 excepted.
 - Changed HTTP/1.0 responses to be kept alive only on the `keep-alive` connection option.
+- Changed the debug output of `rfc9110::response::HttpResponse` to print the body as its length.
+- Changed the debug output of `rfc9110::request::HttpRequest` to hide the userinfo and the query values of its URL.
+
+### Removed
+
+- **BREAKING**: Removed the `Display` implementation of `rfc6750::bearer::HttpAuthBearer`.
+
+  It wrote the raw token. Use `to_authorization` or `expose_secret`.
 
 ### Fixed
+
+- Fixed sensitive response header values being written to the trace log.
+
+  The head reader now logs the response through its redacting debug output.
+
+- Fixed a quoted challenge parameter holding a space starting a new challenge.
+
+  `rfc9110::challenge::HttpChallenge::parse_all` also accepts blanks around the equal sign.
+
+- Fixed a fixed-length or single-chunk body peaking at three times its size in memory.
+- Fixed the response head being parsed again at each read.
 
 - Fixed event stream lines and events being buffered without bound.
 

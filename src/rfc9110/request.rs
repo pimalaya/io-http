@@ -12,7 +12,7 @@ use alloc::{
 use thiserror::Error;
 use url::Url;
 
-use crate::rfc9110::headers::{HTTP_SENSITIVE_HEADERS, HTTP_TRANSFER_ENCODING};
+use crate::rfc9110::headers::{HTTP_TRANSFER_ENCODING, HttpHeadersDebug};
 
 /// Failure causes when serialising an [`HttpRequest`].
 #[derive(Clone, Debug, Eq, PartialEq, Error)]
@@ -102,24 +102,49 @@ impl HttpRequest {
 
 impl fmt::Debug for HttpRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let headers: Vec<(&str, &str)> = self
-            .headers
-            .iter()
-            .map(|(k, v)| {
-                let sensitive = HTTP_SENSITIVE_HEADERS
-                    .iter()
-                    .any(|s| k.eq_ignore_ascii_case(s));
-                let v = if sensitive { "[REDACTED]" } else { v.as_str() };
-                (k.as_str(), v)
-            })
-            .collect();
-
         f.debug_struct("HttpRequest")
             .field("method", &self.method)
-            .field("url", &self.url.as_str())
-            .field("headers", &headers)
+            .field("url", &UrlDebug(&self.url))
+            .field("headers", &HttpHeadersDebug(&self.headers))
             .field("body", &format_args!("[{} bytes]", self.body.len()))
             .finish()
+    }
+}
+
+/// Debug view of a URL: no userinfo, no query value, no fragment.
+struct UrlDebug<'a>(&'a Url);
+
+impl fmt::Debug for UrlDebug<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let url = self.0;
+
+        write!(f, "\"{}://", url.scheme())?;
+
+        if !url.username().is_empty() || url.password().is_some() {
+            f.write_str("[REDACTED]@")?;
+        }
+
+        f.write_str(url.host_str().unwrap_or_default())?;
+
+        if let Some(port) = url.port() {
+            write!(f, ":{port}")?;
+        }
+
+        f.write_str(url.path())?;
+
+        let pairs = url.query().into_iter().flat_map(|query| query.split('&'));
+
+        for (n, pair) in pairs.enumerate() {
+            f.write_str(if n == 0 { "?" } else { "&" })?;
+
+            // NOTE: a pair without `=` may be a bare secret
+            match pair.split_once('=') {
+                Some((name, _)) => write!(f, "{name}=[REDACTED]")?,
+                None => f.write_str("[REDACTED]")?,
+            }
+        }
+
+        f.write_str("\"")
     }
 }
 
@@ -186,6 +211,28 @@ mod tests {
         assert!(
             debug.contains("example.com"),
             "non-sensitive header value must appear"
+        );
+    }
+
+    #[test]
+    fn debug_redacts_url_userinfo_and_query_values() {
+        let url = "https://user:pw@example.com:8443/a/b?token=abc123&page=2&bare#frag";
+        let req = HttpRequest::get(Url::parse(url).unwrap());
+        let debug = format!("{req:?}");
+
+        let url = "https://[REDACTED]@example.com:8443/a/b\
+                   ?token=[REDACTED]&page=[REDACTED]&[REDACTED]";
+        assert!(debug.contains(&format!("url: \"{url}\",")), "got {debug}");
+    }
+
+    #[test]
+    fn debug_keeps_url_without_secrets() {
+        let req = HttpRequest::get(Url::parse("http://example.com/a/b").unwrap());
+        let debug = format!("{req:?}");
+
+        assert!(
+            debug.contains("url: \"http://example.com/a/b\","),
+            "got {debug}"
         );
     }
 }

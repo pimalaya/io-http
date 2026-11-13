@@ -2,16 +2,19 @@
 //!
 //! [RFC 9110 §15]: https://www.rfc-editor.org/rfc/rfc9110#section-15
 
-use core::{fmt, str};
+use core::fmt;
 
-use alloc::{borrow::ToOwned, format, string::String, vec::Vec};
+use alloc::{string::String, vec::Vec};
 
 use crate::rfc9110::{
-    headers::{HTTP_CONTENT_LENGTH, HTTP_SENSITIVE_HEADERS},
+    headers::{HTTP_CONTENT_LENGTH, HttpHeadersDebug},
     status::HttpStatusCode,
 };
 
 /// An incoming HTTP response. Header names are stored lowercase.
+///
+/// Its [`fmt::Debug`] redacts the sensitive headers and prints the
+/// body as its length.
 #[derive(Clone)]
 pub struct HttpResponse {
     /// The response status code.
@@ -65,35 +68,17 @@ impl HttpResponse {
 
 impl fmt::Debug for HttpResponse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let headers: Vec<(&str, &str)> = self
-            .headers
-            .iter()
-            .map(|(k, v)| {
-                let sensitive = HTTP_SENSITIVE_HEADERS
-                    .iter()
-                    .any(|s| k.eq_ignore_ascii_case(s));
-                let v = if sensitive { "[REDACTED]" } else { v.as_str() };
-                (k.as_str(), v)
-            })
-            .collect();
-
         f.debug_struct("HttpResponse")
             .field("status", &self.status)
             .field("version", &self.version)
-            .field("headers", &headers)
-            .field(
-                "body",
-                &match str::from_utf8(&self.body) {
-                    Ok(body) => body.to_owned(),
-                    Err(_) => format!("[{} BYTES]", self.body.len()),
-                },
-            )
+            .field("headers", &HttpHeadersDebug(&self.headers))
+            .field("body", &format_args!("[{} bytes]", self.body.len()))
             .finish()
     }
 }
 
 /// Incremental builder for [`HttpResponse`].
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct HttpResponseBuilder {
     pub(crate) status: Option<HttpStatusCode>,
     pub(crate) version: String,
@@ -128,7 +113,7 @@ impl HttpResponseBuilder {
 
 #[cfg(test)]
 mod tests {
-    use alloc::vec;
+    use alloc::{format, vec};
 
     use crate::rfc9110::response::*;
 
@@ -200,5 +185,24 @@ mod tests {
         assert_eq!(*response.status, 404);
         assert_eq!(response.header("x-custom"), Some("value"));
         assert_eq!(response.body, b"not found");
+    }
+
+    #[test]
+    fn debug_redacts_sensitive_headers_and_body() {
+        let response = HttpResponse {
+            status: HttpStatusCode(200),
+            version: "HTTP/1.1".into(),
+            headers: vec![
+                ("set-cookie".into(), "sid=abc123".into()),
+                ("content-type".into(), "application/json".into()),
+            ],
+            body: br#"{"access_token":"secret-token"}"#.to_vec(),
+        };
+        let debug = format!("{response:?}");
+
+        assert!(!debug.contains("abc123"), "got {debug}");
+        assert!(!debug.contains("secret-token"), "got {debug}");
+        assert!(debug.contains("application/json"), "got {debug}");
+        assert!(debug.contains("body: [31 bytes]"), "got {debug}");
     }
 }

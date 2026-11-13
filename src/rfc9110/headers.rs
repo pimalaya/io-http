@@ -2,6 +2,10 @@
 //!
 //! [RFC 9110 §5]: https://www.rfc-editor.org/rfc/rfc9110#section-5
 
+use core::fmt;
+
+use alloc::string::String;
+
 /// Header names whose values are redacted in [`core::fmt::Debug`] output.
 pub const HTTP_SENSITIVE_HEADERS: &[&str] = &[
     HTTP_AUTHORIZATION,
@@ -34,3 +38,21 @@ pub const HTTP_SET_COOKIE: &str = "set-cookie";
 pub const HTTP_TRANSFER_ENCODING: &str = "transfer-encoding";
 /// The authenticate response header name.
 pub const HTTP_WWW_AUTHENTICATE: &str = "www-authenticate";
+
+/// Debug view of a header list, the values of
+/// [`HTTP_SENSITIVE_HEADERS`] redacted.
+pub(crate) struct HttpHeadersDebug<'a>(pub(crate) &'a [(String, String)]);
+
+impl fmt::Debug for HttpHeadersDebug<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let headers = self.0.iter().map(|(name, value)| {
+            let sensitive = HTTP_SENSITIVE_HEADERS
+                .iter()
+                .any(|s| name.eq_ignore_ascii_case(s));
+            let value = if sensitive { "[REDACTED]" } else { value };
+            (name.as_str(), value)
+        });
+
+        f.debug_list().entries(headers).finish()
+    }
+}

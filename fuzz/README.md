@@ -8,6 +8,8 @@ The same reads go to `SseFrameParser`, the two limits serving as its line and ev
 
 Each parser then gets the same bytes in one read, and must return the same response, chunks, events or failure as with the split reads.
 
+Each read is also parsed as a challenge list by `HttpChallenge::parse_all`, which must not panic nor return a scheme or a parameter without a name.
+
 cargo-fuzz needs a nightly toolchain, which the `fuzz` devShell of the repository flake carries along with cargo-fuzz itself. Bound a run with the libFuzzer flags after the `--` separator:
 
 ```sh

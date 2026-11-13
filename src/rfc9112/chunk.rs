@@ -61,7 +61,9 @@ pub struct Http11ChunksReadOutput {
 enum State {
     #[default]
     ChunkSize,
+    /// The bytes of chunk data still to read.
     ChunkData(usize),
+    ChunkEnd,
     Trailers,
 }
 
@@ -192,22 +194,38 @@ impl HttpCoroutine for Http11ChunksRead {
                         self.state = State::Trailers;
                     } else {
                         debug!("reading chunk of {n} bytes");
+                        // NOTE: one block for the chunk, growth as usual
+                        // when the allocator refuses it
+                        let _ = self.body.try_reserve(n);
                         self.state = State::ChunkData(n);
                     }
                 }
-                State::ChunkData(size) if rest.len() < size + CRLF.len() => {
-                    trace!("received incomplete chunk data {}/{size}", rest.len());
+                State::ChunkData(left) => {
+                    let taken = rest.len().min(left);
+
+                    self.body.extend_from_slice(&rest[..taken]);
+                    self.start += taken;
+
+                    if taken < left {
+                        trace!("received incomplete chunk data, {} left", left - taken);
+                        self.state = State::ChunkData(left - taken);
+                        self.wants_read = true;
+                        continue;
+                    }
+
+                    self.state = State::ChunkEnd;
+                }
+                State::ChunkEnd if rest.len() < CRLF.len() => {
                     self.wants_read = true;
                     continue;
                 }
-                State::ChunkData(size) => {
-                    if rest[size..size + CRLF.len()] != CRLF {
+                State::ChunkEnd => {
+                    if rest[..CRLF.len()] != CRLF {
                         let err = Http11ChunksReadError::InvalidChunkTerminator;
                         return HttpCoroutineState::Complete(Err(err));
                     }
 
-                    self.body.extend_from_slice(&rest[..size]);
-                    self.start += size + CRLF.len();
+                    self.start += CRLF.len();
                     self.state = State::ChunkSize;
                 }
                 State::Trailers => {
