@@ -9,6 +9,11 @@ use core::ops::Deref;
 pub struct HttpStatusCode(pub u16);
 
 impl HttpStatusCode {
+    /// Returns `true` if the status code is in the `1xx` range.
+    pub fn is_informational(self) -> bool {
+        self.0 >= 100 && self.0 < 200
+    }
+
     /// Returns `true` if the status code is in the `2xx` range.
     pub fn is_success(self) -> bool {
         self.0 >= 200 && self.0 < 300

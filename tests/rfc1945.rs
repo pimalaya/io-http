@@ -249,3 +249,42 @@ fn err_on_eof_before_content_length() {
         other => panic!("expected Eof, got: {other:?}"),
     }
 }
+
+#[test]
+fn body_empty_on_head() {
+    let url = Url::parse("http://example.com/").unwrap();
+    let mut request = HttpRequest::get(url).header("Host", "example.com");
+    request.method = "HEAD".into();
+
+    let response = b"HTTP/1.0 200 OK\r\nContent-Length: 1234\r\n\r\n";
+
+    match test_once(Http10Send::new(request), response) {
+        HttpCoroutineState::Complete(Ok(out)) => assert!(out.response.body.is_empty()),
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
+#[test]
+fn keep_alive_false_after_read_to_eof() {
+    let response = b"HTTP/1.0 200 OK\r\nConnection: keep-alive\r\n\r\nhello";
+
+    match test_once(new_send(), response) {
+        HttpCoroutineState::Complete(Ok(out)) => {
+            assert_eq!(out.response.body, b"hello");
+            assert!(!out.keep_alive);
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
+#[test]
+fn err_on_conflicting_content_length() {
+    let response = b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\nContent-Length: 5\r\n\r\nhello";
+
+    match test_once(new_send(), response) {
+        HttpCoroutineState::Complete(Err(Http10SendError::InvalidContentLength(len))) => {
+            assert_eq!(len, "2, 5")
+        }
+        other => panic!("expected InvalidContentLength, got: {other:?}"),
+    }
+}

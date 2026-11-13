@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `max_event_len` to `sse::frame::SseFrameParser`, 1 MiB by default.
 - Added `sse::frame::SseFrameParserError`.
 - Added the event stream parser to the `response` fuzz target.
+- Added a split against whole comparison to the `response` fuzz target.
+- Added `rfc9110::status::HttpStatusCode::is_informational`.
 
 ### Changed
 
@@ -21,12 +23,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Its `Return` is now `Result<Infallible, SseFrameParserError>` instead of `Infallible`.
 
 - **BREAKING**: Changed `client::HttpClientError` to fail with `SseFrameParser`.
+- **BREAKING**: Changed `rfc9112::chunk::Http11ChunksReadError` to fail with `InvalidChunkTerminator` and `TrailerLineTooLarge`.
+- **BREAKING**: Changed `rfc9112::chunk_stream::Http11ChunksReadStreamError` to fail with `InvalidChunkTerminator` and `TrailerLineTooLarge`.
+- **BREAKING**: Changed `rfc9112::send::Http11SendError` to fail with `UnsupportedTransferCoding`.
+
+  A final transfer coding other than `chunked` fails the exchange. Codings before `chunked` stay applied to the body.
+
+- Changed `rfc9112::read_headers::Http11HeadersRead` to skip interim 1xx responses, 101 excepted.
+- Changed HTTP/1.0 responses to be kept alive only on the `keep-alive` connection option.
 
 ### Fixed
 
 - Fixed event stream lines and events being buffered without bound.
 
   A server exceeding a limit now fails the parser, and ends `client::SseStream` with the error.
+
+- Fixed chunk data being accepted without its CRLF.
+- Fixed trailer fields being left unread after a chunked body.
+
+  They are read and dropped, so they no longer start the next response of a reused connection.
+
+- Fixed interim 1xx responses being returned as the final response.
+- Fixed replies to HEAD requests waiting for a body.
+- Fixed `chunked` being missed as the last of several transfer codings.
+- Fixed `close` being missed among several connection options.
+- Fixed `keep_alive` being true after a body read to EOF.
+- Fixed conflicting content length values being accepted.
+
+  They fail with `InvalidContentLength`. Repeated identical values are accepted.
+
+- Fixed response heads over 64 headers failing to parse.
+
+  The head size limit is now the only limit on the number of headers.
 
 ## [0.6.0] - 2026-11-03
 

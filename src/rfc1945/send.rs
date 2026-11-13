@@ -5,10 +5,11 @@
 //! wire format: no chunked transfer coding, connections close by default unless
 //! the server returns `Connection: keep-alive`.
 //!
-//! | Strategy     | Trigger               |
-//! |--------------|-----------------------|
-//! | Fixed-length | `Content-Length: <n>` |
-//! | Read-to-EOF  | Header absent         |
+//! | Strategy     | Trigger                                 |
+//! |--------------|-----------------------------------------|
+//! | No body      | HEAD request, or status 1xx, 204 or 304 |
+//! | Fixed-length | `Content-Length: <n>`                   |
+//! | Read-to-EOF  | Header absent                           |
 //!
 //! # Example
 //!
@@ -53,7 +54,7 @@
 
 use core::mem;
 
-use alloc::{borrow::ToOwned, string::String, vec::Vec};
+use alloc::{string::String, vec::Vec};
 
 use httparse::Error as HttparseError;
 use log::{debug, trace};
@@ -63,7 +64,7 @@ use url::Url;
 use crate::{
     coroutine::*,
     rfc9110::{
-        headers::{HTTP_CONTENT_LENGTH, HTTP_LOCATION},
+        headers::HTTP_LOCATION,
         request::HttpRequest,
         response::HttpResponse,
         send::{HTTP_DEFAULT_MAX_BODY_LEN, HttpSendOutput, HttpSendYield},
@@ -82,7 +83,7 @@ pub enum Http10SendError {
     /// The response head could not be parsed.
     #[error("HTTP/1.0 send failed: parse response headers: {0}")]
     ParseResponseHeaders(HttparseError),
-    /// The content length header value is not a valid integer.
+    /// A content length value is not a valid integer, or two differ.
     #[error("HTTP/1.0 send failed: invalid content length `{0}`")]
     InvalidContentLength(String),
     /// The response head exceeds [`Http10Send::max_headers_len`].
@@ -114,6 +115,7 @@ pub struct Http10Send {
     /// [`HTTP_DEFAULT_MAX_BODY_LEN`].
     pub max_body_len: usize,
     request_url: Url,
+    is_head: bool,
     state: State,
     wants_write: Option<Vec<u8>>,
     keep_alive: bool,
@@ -129,12 +131,14 @@ impl Http10Send {
         trace!("{req:?}");
 
         let request_url = req.url.clone();
+        let is_head = req.method == "HEAD";
         let bytes = req.to_http_10_vec();
 
         Self {
             max_headers_len: HTTP_DEFAULT_MAX_HEADERS_LEN,
             max_body_len: HTTP_DEFAULT_MAX_BODY_LEN,
             request_url,
+            is_head,
             state: State::ReadHeaders(Http11HeadersRead::default()),
             wants_write: Some(bytes),
             keep_alive: false,
@@ -205,21 +209,24 @@ impl HttpCoroutine for Http10Send {
                         self.keep_alive = out.keep_alive;
                         let status = *response.status;
 
-                        if status == 204 || status == 304 {
+                        let no_body = response.status.is_informational()
+                            || status == 204
+                            || status == 304
+                            || self.is_head;
+
+                        if no_body {
                             return self.finish(response, out.remaining);
                         }
 
-                        if let Some(len_str) = response.header(HTTP_CONTENT_LENGTH) {
-                            let len_str = len_str.trim();
-                            let is_digits = len_str.bytes().all(|b| b.is_ascii_digit());
-
-                            let Some(len) =
-                                is_digits.then(|| len_str.parse::<usize>().ok()).flatten()
-                            else {
-                                let err = Http10SendError::InvalidContentLength(len_str.to_owned());
+                        let len = match response.content_length() {
+                            Ok(len) => len,
+                            Err(len) => {
+                                let err = Http10SendError::InvalidContentLength(len);
                                 return HttpCoroutineState::Complete(Err(err));
-                            };
+                            }
+                        };
 
+                        if let Some(len) = len {
                             if len > self.max_body_len {
                                 let err = Http10SendError::BodyTooLarge(self.max_body_len);
                                 return HttpCoroutineState::Complete(Err(err));
@@ -235,6 +242,7 @@ impl HttpCoroutine for Http10Send {
                         self.buf = out.remaining;
                         self.response = Some(response);
                         debug!("reading body until connection closes");
+                        self.keep_alive = false;
                         self.state = State::BodyEof;
                     }
                 },

@@ -5,11 +5,16 @@
 //! [`Http11HeadersRead`] for the head and selects a body-reading
 //! strategy from the response headers:
 //!
-//! | Strategy     | Trigger                      |
-//! |--------------|------------------------------|
-//! | Chunked      | `Transfer-Encoding: chunked` |
-//! | Fixed-length | `Content-Length: <n>`        |
-//! | Read-to-EOF  | Neither header present       |
+//! | Strategy     | Trigger                                   |
+//! |--------------|-------------------------------------------|
+//! | No body      | HEAD request, or status 1xx, 204 or 304   |
+//! | Chunked      | `chunked` as the final transfer coding    |
+//! | Fixed-length | `Content-Length: <n>`                     |
+//! | Read-to-EOF  | Neither header present                    |
+//!
+//! Interim 1xx responses are skipped. Any other final transfer coding
+//! fails the exchange, and codings before `chunked` stay applied to the
+//! body.
 //!
 //! # Example
 //!
@@ -70,7 +75,7 @@ use crate::{
     http_try,
     rfc1945::version::HTTP_10,
     rfc9110::{
-        headers::{HTTP_CONTENT_LENGTH, HTTP_LOCATION, HTTP_TRANSFER_ENCODING},
+        headers::{HTTP_LOCATION, HTTP_TRANSFER_ENCODING},
         request::HttpRequest,
         response::HttpResponse,
         send::{HTTP_DEFAULT_MAX_BODY_LEN, HttpSendOutput, HttpSendYield},
@@ -90,9 +95,12 @@ pub enum Http11SendError {
     /// The response head could not be parsed.
     #[error("HTTP/1.1 send failed: parse response headers: {0}")]
     ParseResponseHeaders(HttparseError),
-    /// The content length header value is not a valid integer.
+    /// A content length value is not a valid integer, or two differ.
     #[error("HTTP/1.1 send failed: invalid content length `{0}`")]
     InvalidContentLength(String),
+    /// The final transfer coding is not `chunked`.
+    #[error("HTTP/1.1 send failed: unsupported transfer coding `{0}`")]
+    UnsupportedTransferCoding(String),
     /// The chunked-body decoder failed.
     #[error("HTTP/1.1 send failed: {0}")]
     ReadChunks(#[from] Http11ChunksReadError),
@@ -133,6 +141,7 @@ pub struct Http11Send {
     /// [`HTTP_DEFAULT_MAX_BODY_LEN`].
     pub max_body_len: usize,
     request_url: Url,
+    is_head: bool,
     state: State,
     wants_write: Option<Vec<u8>>,
     is_conn_closed: bool,
@@ -148,12 +157,14 @@ impl Http11Send {
         trace!("{req:?}");
 
         let request_url = req.url.clone();
+        let is_head = req.method == "HEAD";
         let bytes = req.to_http_11_vec();
 
         Self {
             max_headers_len: HTTP_DEFAULT_MAX_HEADERS_LEN,
             max_body_len: HTTP_DEFAULT_MAX_BODY_LEN,
             request_url,
+            is_head,
             state: State::ReadHeaders(Http11HeadersRead::default()),
             wants_write: Some(bytes),
             is_conn_closed: false,
@@ -225,14 +236,31 @@ impl HttpCoroutine for Http11Send {
                         self.is_conn_closed = !out.keep_alive;
                         let status = *response.status;
 
-                        if status == 204 || status == 304 {
+                        let no_body = response.status.is_informational()
+                            || status == 204
+                            || status == 304
+                            || self.is_head;
+
+                        if no_body {
                             return self.finish(response, out.remaining);
                         }
 
                         if !is_http10 {
-                            let chunked = response
-                                .header(HTTP_TRANSFER_ENCODING)
-                                .is_some_and(|enc| enc.eq_ignore_ascii_case("chunked"));
+                            let coding = response
+                                .header_list(HTTP_TRANSFER_ENCODING)
+                                .filter(|coding| !coding.is_empty())
+                                .last();
+
+                            let chunked = match coding {
+                                None => false,
+                                Some(coding) if coding.eq_ignore_ascii_case("chunked") => true,
+                                Some(coding) => {
+                                    let coding = coding.to_owned();
+                                    let err = Http11SendError::UnsupportedTransferCoding(coding);
+                                    return HttpCoroutineState::Complete(Err(err));
+                                }
+                            };
+
                             if chunked {
                                 let mut chunks = Http11ChunksRead::default();
                                 chunks.max_body_len = self.max_body_len;
@@ -265,17 +293,15 @@ impl HttpCoroutine for Http11Send {
                             }
                         }
 
-                        if let Some(len_str) = response.header(HTTP_CONTENT_LENGTH) {
-                            let len_str = len_str.trim();
-                            let is_digits = len_str.bytes().all(|b| b.is_ascii_digit());
-
-                            let Some(len) =
-                                is_digits.then(|| len_str.parse::<usize>().ok()).flatten()
-                            else {
-                                let err = Http11SendError::InvalidContentLength(len_str.to_owned());
+                        let len = match response.content_length() {
+                            Ok(len) => len,
+                            Err(len) => {
+                                let err = Http11SendError::InvalidContentLength(len);
                                 return HttpCoroutineState::Complete(Err(err));
-                            };
+                            }
+                        };
 
+                        if let Some(len) = len {
                             if len > self.max_body_len {
                                 let err = Http11SendError::BodyTooLarge(self.max_body_len);
                                 return HttpCoroutineState::Complete(Err(err));
@@ -291,6 +317,7 @@ impl HttpCoroutine for Http11Send {
                         self.buf = out.remaining;
                         self.response = Some(response);
                         debug!("reading body until connection closes");
+                        self.is_conn_closed = true;
                         self.state = State::BodyEof;
                     }
                 },

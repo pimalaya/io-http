@@ -4,7 +4,9 @@ Coverage-guided fuzzing of the response parsers with [cargo-fuzz](https://github
 
 The `response` target feeds arbitrary bytes, split into arbitrary reads and followed by EOF, to `Http11Send`, `Http10Send` and `Http11ChunksReadStream`, with fuzzed head and body limits. Its oracle is that whatever a server sends, the coroutines answer or fail, never panic, never keep asking for reads after EOF, and never return a body larger than their limit.
 
-The same reads go to `SseFrameParser`, the two limits serving as its line and event limits. Its oracle is that no event exceeds a limit, and that the events and the failure are the same whether the stream arrives split or whole.
+The same reads go to `SseFrameParser`, the two limits serving as its line and event limits, and no event may exceed a limit.
+
+Each parser then gets the same bytes in one read, and must return the same response, chunks, events or failure as with the split reads.
 
 cargo-fuzz needs a nightly toolchain, which the `fuzz` devShell of the repository flake carries along with cargo-fuzz itself. Bound a run with the libFuzzer flags after the `--` separator:
 

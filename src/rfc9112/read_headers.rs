@@ -4,7 +4,7 @@
 //!
 //! [RFC 9112 §6]: https://www.rfc-editor.org/rfc/rfc9112#section-6
 
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 
 use httparse::{EMPTY_HEADER, Error as HttparseError, Response, Status};
 use log::{debug, trace};
@@ -51,14 +51,18 @@ pub struct Http11HeadersReadOutput {
 pub const HTTP_DEFAULT_MAX_HEADERS_LEN: usize = 64 * 1024;
 
 /// I/O-free coroutine to read and parse an HTTP/1.X response head.
+/// Interim 1xx responses are skipped, except 101.
 #[derive(Debug)]
 pub struct Http11HeadersRead {
     /// Maximum size in bytes of the response head, status line and
     /// terminating empty line included. A peer exceeding it fails the
     /// read with [`Http11HeadersReadError::TooLarge`] instead of growing
-    /// the buffer without bound.
+    /// the buffer without bound. It is the only limit on the number of
+    /// headers.
     pub max_len: usize,
     buf: Vec<u8>,
+    /// How many headers the next parse has room for.
+    headers_cap: usize,
 }
 
 impl Default for Http11HeadersRead {
@@ -66,6 +70,7 @@ impl Default for Http11HeadersRead {
         Self {
             max_len: HTTP_DEFAULT_MAX_HEADERS_LEN,
             buf: Vec::new(),
+            headers_cap: 64,
         }
     }
 }
@@ -83,56 +88,69 @@ impl HttpCoroutine for Http11HeadersRead {
             None => {}
         }
 
-        let mut headers = [EMPTY_HEADER; 64];
-        let mut parsed = Response::new(&mut headers);
+        loop {
+            let window = &self.buf[..self.buf.len().min(self.max_len)];
+            let mut headers = vec![EMPTY_HEADER; self.headers_cap];
+            let mut parsed = Response::new(&mut headers);
 
-        let header_end = match parsed.parse(&self.buf) {
-            Ok(Status::Complete(n)) if n > self.max_len => {
-                let err = Http11HeadersReadError::TooLarge(self.max_len);
-                return HttpCoroutineState::Complete(Err(err));
-            }
-            Ok(Status::Complete(n)) => n,
-            Ok(Status::Partial) if self.buf.len() > self.max_len => {
-                let err = Http11HeadersReadError::TooLarge(self.max_len);
-                return HttpCoroutineState::Complete(Err(err));
-            }
-            Ok(Status::Partial) => {
-                trace!("received incomplete headers");
-                return HttpCoroutineState::Yielded(HttpYield::WantsRead);
-            }
-            Err(err) => {
-                return HttpCoroutineState::Complete(Err(
-                    Http11HeadersReadError::ParseResponseHeaders(err),
-                ));
-            }
-        };
+            let header_end = match parsed.parse(window) {
+                Ok(Status::Complete(n)) => n,
+                Ok(Status::Partial) if self.buf.len() > self.max_len => {
+                    let err = Http11HeadersReadError::TooLarge(self.max_len);
+                    return HttpCoroutineState::Complete(Err(err));
+                }
+                Ok(Status::Partial) => {
+                    trace!("received incomplete headers");
+                    return HttpCoroutineState::Yielded(HttpYield::WantsRead);
+                }
+                Err(HttparseError::TooManyHeaders) => {
+                    self.headers_cap *= 2;
+                    continue;
+                }
+                Err(err) => {
+                    return HttpCoroutineState::Complete(Err(
+                        Http11HeadersReadError::ParseResponseHeaders(err),
+                    ));
+                }
+            };
 
-        let mut builder = HttpResponseBuilder::default();
-        let is_http10 = matches!(parsed.version, Some(0));
-        builder.version = if is_http10 { HTTP_10 } else { HTTP_11 }.into();
-        if let Some(code) = parsed.code {
-            builder.status = Some(HttpStatusCode(code));
+            let status = parsed.code.map(HttpStatusCode);
+
+            // NOTE: 101 switches protocols, which makes it a final response
+            if status.is_some_and(|status| status.is_informational() && *status != 101) {
+                debug!("skip interim response");
+                self.buf.drain(..header_end);
+                continue;
+            }
+
+            let mut builder = HttpResponseBuilder::default();
+            let is_http10 = matches!(parsed.version, Some(0));
+            builder.version = if is_http10 { HTTP_10 } else { HTTP_11 }.into();
+            builder.status = status;
+            for header in parsed.headers.iter() {
+                builder.header(header.name, header.value);
+            }
+
+            debug!("received complete headers");
+            trace!("{builder:?}");
+
+            let response = builder.build(Vec::new());
+            let remaining = self.buf.split_off(header_end);
+
+            let has_option = |option: &str| {
+                response
+                    .header_list(HTTP_CONNECTION)
+                    .any(|o| o.eq_ignore_ascii_case(option))
+            };
+
+            let keep_alive = !has_option("close") && (!is_http10 || has_option("keep-alive"));
+
+            return HttpCoroutineState::Complete(Ok(Http11HeadersReadOutput {
+                response,
+                remaining,
+                keep_alive,
+            }));
         }
-        for header in parsed.headers.iter() {
-            builder.header(header.name, header.value);
-        }
-
-        let keep_alive = match builder.get_header(HTTP_CONNECTION) {
-            Some(conn) => !conn.eq_ignore_ascii_case("close"),
-            None => !is_http10,
-        };
-
-        debug!("received complete headers");
-        trace!("{builder:?}");
-
-        let response = builder.build(Vec::new());
-        let remaining = self.buf.split_off(header_end);
-
-        HttpCoroutineState::Complete(Ok(Http11HeadersReadOutput {
-            response,
-            remaining,
-            keep_alive,
-        }))
     }
 }
 

@@ -7,7 +7,10 @@ use io_http::{
     coroutine::*,
     rfc9110::{request::HttpRequest, send::*},
     rfc9112::{
-        chunk::{Http11ChunksRead, Http11ChunksReadError},
+        chunk::{HTTP11_MAX_CHUNK_LINE_LEN, Http11ChunksRead, Http11ChunksReadError},
+        chunk_stream::{
+            Http11ChunksReadStream, Http11ChunksReadStreamError, Http11ChunksReadStreamYield,
+        },
         send::{Http11Send, Http11SendError},
     },
 };
@@ -459,5 +462,387 @@ fn err_on_eof_before_last_chunk() {
             Http11ChunksReadError::Eof,
         ))) => {}
         other => panic!("expected Eof, got: {other:?}"),
+    }
+}
+
+#[test]
+fn chunks_trailers_consumed() {
+    let mut chunks = Http11ChunksRead::default();
+
+    match chunks.resume(Some(b"5\r\nhello\r\n0\r\nX-T: 1\r\nX-U: 2\r\n\r\nNEXT")) {
+        HttpCoroutineState::Complete(Ok(out)) => {
+            assert_eq!(out.body, b"hello");
+            assert_eq!(out.remaining, b"NEXT");
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
+#[test]
+fn err_on_chunk_data_without_crlf() {
+    let mut chunks = Http11ChunksRead::default();
+
+    match chunks.resume(Some(b"5\r\nhelloXX0\r\n\r\n")) {
+        HttpCoroutineState::Complete(Err(Http11ChunksReadError::InvalidChunkTerminator)) => {}
+        other => panic!("expected InvalidChunkTerminator, got: {other:?}"),
+    }
+}
+
+#[test]
+fn err_on_trailer_line_over_limit() {
+    let mut encoded = b"0\r\n".to_vec();
+    encoded.resize(encoded.len() + HTTP11_MAX_CHUNK_LINE_LEN + 2, b'a');
+
+    match Http11ChunksRead::default().resume(Some(&encoded)) {
+        HttpCoroutineState::Complete(Err(Http11ChunksReadError::TrailerLineTooLarge(_))) => {}
+        other => panic!("expected TrailerLineTooLarge, got: {other:?}"),
+    }
+
+    let (_, end) = test_chunk_stream(&encoded);
+    assert!(
+        matches!(
+            end,
+            Err(Http11ChunksReadStreamError::TrailerLineTooLarge(_))
+        ),
+        "got {end:?}"
+    );
+}
+
+/// Feeds `encoded` once to the streaming decoder, then reports EOF.
+fn test_chunk_stream(
+    encoded: &[u8],
+) -> (Vec<Vec<u8>>, Result<Vec<u8>, Http11ChunksReadStreamError>) {
+    let mut chunks = Http11ChunksReadStream::default();
+    let mut arg = Some(encoded);
+    let mut frames = Vec::new();
+
+    loop {
+        match chunks.resume(arg.take()) {
+            HttpCoroutineState::Yielded(Http11ChunksReadStreamYield::Frame { body }) => {
+                frames.push(body)
+            }
+            HttpCoroutineState::Yielded(Http11ChunksReadStreamYield::WantsRead) => arg = Some(b""),
+            HttpCoroutineState::Complete(end) => return (frames, end),
+        }
+    }
+}
+
+#[test]
+fn chunk_stream_trailers_consumed() {
+    let (frames, end) = test_chunk_stream(b"5\r\nhello\r\n0\r\nX-T: 1\r\nX-U: 2\r\n\r\nNEXT");
+
+    assert_eq!(frames, [b"hello"]);
+    assert_eq!(end.unwrap(), b"NEXT");
+}
+
+#[test]
+fn err_on_chunk_stream_data_without_crlf() {
+    let (frames, end) = test_chunk_stream(b"5\r\nhelloXX0\r\n\r\n");
+
+    assert!(frames.is_empty(), "got {frames:?}");
+    assert!(
+        matches!(
+            end,
+            Err(Http11ChunksReadStreamError::InvalidChunkTerminator)
+        ),
+        "got {end:?}"
+    );
+}
+
+#[test]
+fn interim_responses_skipped() {
+    let response = b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 103 Early Hints\r\nLink: </s.css>\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+
+    match test_once(new_send(), response) {
+        HttpCoroutineState::Complete(Ok(out)) => {
+            assert_eq!(*out.response.status, 200);
+            assert_eq!(out.response.header("link"), None);
+            assert_eq!(out.response.body, b"ok");
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
+#[test]
+fn body_empty_on_head() {
+    let url = Url::parse("http://example.com/").unwrap();
+    let mut request = HttpRequest::get(url).header("Host", "example.com");
+    request.method = "HEAD".into();
+
+    let response = b"HTTP/1.1 200 OK\r\nContent-Length: 1234\r\n\r\n";
+
+    match test_once(Http11Send::new(request), response) {
+        HttpCoroutineState::Complete(Ok(out)) => {
+            assert!(out.response.body.is_empty());
+            assert!(out.keep_alive);
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
+#[test]
+fn body_chunked_as_final_transfer_coding() {
+    let response =
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+
+    match test_once(new_send(), response) {
+        HttpCoroutineState::Complete(Ok(out)) => assert_eq!(out.response.body, b"hello"),
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
+#[test]
+fn body_chunked_across_transfer_encoding_lines() {
+    let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\nTransfer-Encoding: Chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+
+    match test_once(new_send(), response) {
+        HttpCoroutineState::Complete(Ok(out)) => assert_eq!(out.response.body, b"hello"),
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
+#[test]
+fn err_on_final_transfer_coding_not_chunked() {
+    let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked, gzip\r\n\r\nhello";
+
+    match test_once(new_send(), response) {
+        HttpCoroutineState::Complete(Err(Http11SendError::UnsupportedTransferCoding(coding))) => {
+            assert_eq!(coding, "gzip")
+        }
+        other => panic!("expected UnsupportedTransferCoding, got: {other:?}"),
+    }
+}
+
+#[test]
+fn switching_protocols_ends_at_head() {
+    let response = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: other\r\n\r\nRAW";
+
+    match test_once(new_send(), response) {
+        HttpCoroutineState::Complete(Ok(out)) => {
+            assert_eq!(*out.response.status, 101);
+            assert!(out.response.body.is_empty());
+            assert_eq!(out.remaining, b"RAW");
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
+#[test]
+fn keep_alive_false_after_read_to_eof() {
+    let response = b"HTTP/1.1 200 OK\r\n\r\nhello";
+
+    match test_once(new_send(), response) {
+        HttpCoroutineState::Complete(Ok(out)) => {
+            assert_eq!(out.response.body, b"hello");
+            assert!(!out.keep_alive);
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
+#[test]
+fn keep_alive_false_on_close_among_connection_options() {
+    for response in [
+        &b"HTTP/1.1 200 OK\r\nConnection: TE, Close\r\nContent-Length: 0\r\n\r\n"[..],
+        &b"HTTP/1.1 200 OK\r\nConnection: TE\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"[..],
+    ] {
+        match test_once(new_send(), response) {
+            HttpCoroutineState::Complete(Ok(out)) => assert!(!out.keep_alive),
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn keep_alive_on_http10_needs_keep_alive_option() {
+    let response = b"HTTP/1.0 200 OK\r\nConnection: TE\r\nContent-Length: 0\r\n\r\n";
+
+    match test_once(new_send(), response) {
+        HttpCoroutineState::Complete(Ok(out)) => assert!(!out.keep_alive),
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
+#[test]
+fn err_on_conflicting_content_length() {
+    for response in [
+        &b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Length: 5\r\n\r\nhello"[..],
+        &b"HTTP/1.1 200 OK\r\nContent-Length: 2, 5\r\n\r\nhello"[..],
+    ] {
+        match test_once(new_send(), response) {
+            HttpCoroutineState::Complete(Err(Http11SendError::InvalidContentLength(len))) => {
+                assert_eq!(len, "2, 5")
+            }
+            other => panic!("expected InvalidContentLength, got: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn body_content_length_repeated() {
+    let response = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 5, 5\r\n\r\nhello";
+
+    match test_once(new_send(), response) {
+        HttpCoroutineState::Complete(Ok(out)) => assert_eq!(out.response.body, b"hello"),
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
+#[test]
+fn head_with_more_than_64_headers() {
+    let mut response = b"HTTP/1.1 200 OK\r\n".to_vec();
+    for n in 0..200 {
+        response.extend(format!("X-{n}: v\r\n").bytes());
+    }
+    response.extend(b"Content-Length: 2\r\n\r\nok");
+
+    match test_once(new_send(), &response) {
+        HttpCoroutineState::Complete(Ok(out)) => {
+            assert_eq!(out.response.headers.len(), 201);
+            assert_eq!(out.response.body, b"ok");
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
+/// Runs an exchange over `reads` then EOF. The bytes left past the
+/// response are kept out, they depend on where the reads stop.
+fn outcome(reads: &[&[u8]]) -> String {
+    let mut send = new_send();
+    let mut reads = reads.iter();
+    let mut eofs = 0;
+    let mut arg: Option<&[u8]> = None;
+
+    loop {
+        match send.resume(arg.take()) {
+            HttpCoroutineState::Yielded(HttpSendYield::WantsWrite(_)) => {}
+            HttpCoroutineState::Yielded(HttpSendYield::WantsRead) => match reads.next() {
+                Some(read) => arg = Some(read),
+                None => {
+                    eofs += 1;
+                    assert!(eofs <= 2, "spins on EOF");
+                    arg = Some(b"");
+                }
+            },
+            HttpCoroutineState::Yielded(HttpSendYield::WantsRedirect {
+                url,
+                response,
+                keep_alive,
+                same_origin,
+            }) => return format!("redirect {url} {response:?} {keep_alive} {same_origin}"),
+            HttpCoroutineState::Complete(Ok(out)) => {
+                return format!("ok {:?} {}", out.response, out.keep_alive);
+            }
+            HttpCoroutineState::Complete(Err(err)) => return format!("err {err}"),
+        }
+    }
+}
+
+fn responses() -> Vec<Vec<u8>> {
+    let big = "x".repeat(70_000);
+
+    let mut many_headers = b"HTTP/1.1 200 OK\r\n".to_vec();
+    for n in 0..200 {
+        many_headers.extend(format!("X-{n}: v\r\n").bytes());
+    }
+    many_headers.extend(b"Content-Length: 2\r\n\r\nok");
+
+    let fixed: [&[u8]; 37] = [
+        b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Type: text/plain\r\n\r\nhello",
+        b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n",
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5;a=b\r\nhello\r\n0\r\n\r\n",
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: Chunked\r\n\r\nA\r\n0123456789\r\n0\r\n\r\n",
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\nX-T: 1\r\nX-U: 2\r\n\r\n",
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhelloXX0\r\n\r\n",
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nX-T: 1\r\n",
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked, gzip\r\n\r\nhello",
+        b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nbody until close",
+        b"HTTP/1.1 200 OK\r\nConnection: TE, close\r\nContent-Length: 2\r\n\r\nok",
+        b"HTTP/1.1 200 OK\r\n\r\nbody until close",
+        b"HTTP/1.0 200 OK\r\nConnection: keep-alive\r\nContent-Length: 2\r\n\r\nok",
+        b"HTTP/1.1 204 No Content\r\n\r\n",
+        b"HTTP/1.1 304 Not Modified\r\nETag: \"a\"\r\n\r\n",
+        b"HTTP/1.1 302 Found\r\nLocation: https://other.example/x\r\nContent-Length: 0\r\n\r\n",
+        b"HTTP/1.1 301 Moved\r\nLocation: /c\r\nContent-Length: 2\r\n\r\nhi",
+        b"HTTP/1.1 500 Oops\r\nContent-Length: 3\r\n\r\nerr",
+        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nokHTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nx",
+        b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort",
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhel",
+        b"\x00\xff\r\n\r\nnot http at all",
+        b"HTTP/1.1 200 OK\nContent-Length: 2\n\nok",
+        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Length: 5\r\n\r\nhello",
+        b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\nhello",
+        b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+        b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+        b"HTTP/1.1 103 Early Hints\r\nLink: </s.css>\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+        b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 102 Processing\r\n\r\n",
+        b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: other\r\n\r\nRAW",
+        b"HTTP/1.1 200 OK\r\nContent-Length: -1\r\n\r\nx",
+        b"HTTP/1.1 200 OK\r\nContent-Length: 99999999999999999999999\r\n\r\nx",
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffffff\r\nx\r\n",
+        b"HTTP/1.1 200 OK\r\nBroken header\r\nContent-Length: 0\r\n\r\n",
+        b"HTTP/1.1 200 OK\r\nX-A: 1\r\n continued\r\nContent-Length: 0\r\n\r\n",
+        &many_headers,
+    ];
+
+    let mut responses: Vec<Vec<u8>> = fixed.iter().map(|response| response.to_vec()).collect();
+
+    responses.push(
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{big}",
+            big.len()
+        )
+        .into_bytes(),
+    );
+    responses.push(
+        format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{big}\r\n0\r\n\r\n",
+            big.len()
+        )
+        .into_bytes(),
+    );
+
+    responses
+}
+
+#[test]
+fn same_outcome_however_the_response_is_split() {
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+    let mut random = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed as usize
+    };
+
+    for response in responses() {
+        let whole = outcome(&[&response]);
+        let name = String::from_utf8_lossy(&response[..response.len().min(60)]).into_owned();
+
+        let bytes: Vec<&[u8]> = response.chunks(1).collect();
+        assert_eq!(outcome(&bytes), whole, "{name:?} byte by byte");
+
+        let step = (response.len() / 2000).max(1);
+        for cut in (1..response.len()).step_by(step) {
+            let (head, tail) = response.split_at(cut);
+            assert_eq!(outcome(&[head, tail]), whole, "{name:?} cut at {cut}");
+        }
+
+        let rounds = if response.len() > 10_000 { 40 } else { 500 };
+        for _ in 0..rounds {
+            let mut reads: Vec<&[u8]> = Vec::new();
+            let mut rest = response.as_slice();
+
+            while !rest.is_empty() {
+                let max = rest.len().min(1 + random() % 97);
+                let (head, tail) = rest.split_at(1 + random() % max);
+                reads.push(head);
+                rest = tail;
+            }
+
+            assert_eq!(outcome(&reads), whole, "{name:?} split as {reads:?}");
+        }
     }
 }

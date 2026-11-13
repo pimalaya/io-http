@@ -27,7 +27,7 @@ pub enum Http11ChunksReadStreamError {
     /// The chunk size line is not a valid hexadecimal integer.
     #[error("HTTP/1.1 read chunks failed: invalid chunk size `{0}`")]
     InvalidChunkSize(String),
-    /// The stream reached EOF before the zero-length terminator.
+    /// The stream reached EOF before the end of the chunked body.
     #[error("HTTP/1.1 read chunks failed: reached unexpected EOF")]
     Eof,
     /// The chunk size line exceeds [`HTTP11_MAX_CHUNK_LINE_LEN`].
@@ -36,6 +36,12 @@ pub enum Http11ChunksReadStreamError {
     /// A chunk exceeds [`Http11ChunksReadStream::max_chunk_len`].
     #[error("HTTP/1.1 read chunks failed: chunk exceeds {0} bytes")]
     ChunkTooLarge(usize),
+    /// The chunk data is not followed by CRLF.
+    #[error("HTTP/1.1 read chunks failed: chunk data not followed by CRLF")]
+    InvalidChunkTerminator,
+    /// A trailer line exceeds [`HTTP11_MAX_CHUNK_LINE_LEN`].
+    #[error("HTTP/1.1 read chunks failed: trailer line exceeds {0} bytes")]
+    TrailerLineTooLarge(usize),
 }
 
 /// Per-step yield emitted by [`Http11ChunksReadStream`]; adds
@@ -57,10 +63,12 @@ enum State {
     #[default]
     ChunkSize,
     ChunkData(usize),
+    Trailers,
 }
 
 /// I/O-free streaming chunked-body decoder. `Complete(Ok(remaining))`
-/// carries bytes already buffered past the zero-length terminator.
+/// carries bytes already buffered past the trailer section, whose
+/// fields are read and dropped.
 #[derive(Debug)]
 pub struct Http11ChunksReadStream {
     /// Maximum size in bytes of a single chunk. A chunk announcing more
@@ -167,20 +175,48 @@ impl HttpCoroutine for Http11ChunksReadStream {
                     }
 
                     self.start += crlf + CRLF.len();
-                    debug!("reading chunk of {n} bytes");
-                    self.state = State::ChunkData(n);
+
+                    if n == 0 {
+                        debug!("reading trailers");
+                        self.state = State::Trailers;
+                    } else {
+                        debug!("reading chunk of {n} bytes");
+                        self.state = State::ChunkData(n);
+                    }
                 }
                 State::ChunkData(size) if rest.len() < size + CRLF.len() => {
                     trace!("received incomplete chunk data {}/{size}", rest.len());
                     self.wants_read = true;
                     continue;
                 }
-                State::ChunkData(0) => {
-                    self.start += CRLF.len();
-                    self.state = State::ChunkSize;
-                    self.done = true;
+                State::Trailers => {
+                    let line_window = rest.len().min(HTTP11_MAX_CHUNK_LINE_LEN + CRLF.len());
+
+                    let Some(crlf) = crlf_position(&rest[..line_window]) else {
+                        if line_window == HTTP11_MAX_CHUNK_LINE_LEN + CRLF.len() {
+                            let limit = HTTP11_MAX_CHUNK_LINE_LEN;
+                            let err = Http11ChunksReadStreamError::TrailerLineTooLarge(limit);
+                            return HttpCoroutineState::Complete(Err(err));
+                        }
+
+                        self.wants_read = true;
+                        continue;
+                    };
+
+                    self.start += crlf + CRLF.len();
+
+                    if crlf == 0 {
+                        self.done = true;
+                    } else {
+                        trace!("ignore trailer field of {crlf} bytes");
+                    }
                 }
                 State::ChunkData(size) => {
+                    if rest[size..size + CRLF.len()] != CRLF {
+                        let err = Http11ChunksReadStreamError::InvalidChunkTerminator;
+                        return HttpCoroutineState::Complete(Err(err));
+                    }
+
                     let body = rest[..size].to_vec();
                     self.start += size + CRLF.len();
                     self.state = State::ChunkSize;

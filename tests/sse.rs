@@ -102,6 +102,16 @@ fn writes_request_and_parses_headers() {
 }
 
 #[test]
+fn skips_interim_response() {
+    let response = b"HTTP/1.1 103 Early Hints\r\nLink: </s.css>\r\n\r\nHTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nB\r\ndata: one\n\n\r\n0\r\n\r\n";
+    let (_mock, sse) = open(response);
+    let mut sse = sse.expect("send_streaming");
+
+    assert_eq!(*sse.response().status, 200);
+    assert_eq!(sse.next_frame().unwrap().expect("frame").data, "one");
+}
+
+#[test]
 fn rejects_non_chunked_response() {
     let response =
         b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 0\r\n\r\n";
@@ -159,7 +169,7 @@ fn one_event_split_across_two_chunks() {
 
 #[test]
 fn event_with_id_and_type() {
-    let body = "1F\r\nevent: state\nid: 42\ndata: ok\n\n\r\n0\r\n\r\n";
+    let body = "1E\r\nevent: state\nid: 42\ndata: ok\n\n\r\n0\r\n\r\n";
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n{body}"
     );
@@ -175,7 +185,7 @@ fn event_with_id_and_type() {
 
 #[test]
 fn comment_lines_are_skipped() {
-    let body = "D\r\n: keep-alive\n\n\r\nB\r\ndata: hi\n\n\r\n0\r\n\r\n";
+    let body = "E\r\n: keep-alive\n\n\r\nA\r\ndata: hi\n\n\r\n0\r\n\r\n";
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n{body}"
     );

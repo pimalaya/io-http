@@ -6,7 +6,10 @@ use core::{fmt, str};
 
 use alloc::{borrow::ToOwned, format, string::String, vec::Vec};
 
-use crate::rfc9110::{headers::HTTP_SENSITIVE_HEADERS, status::HttpStatusCode};
+use crate::rfc9110::{
+    headers::{HTTP_CONTENT_LENGTH, HTTP_SENSITIVE_HEADERS},
+    status::HttpStatusCode,
+};
 
 /// An incoming HTTP response. Header names are stored lowercase.
 #[derive(Clone)]
@@ -28,6 +31,35 @@ impl HttpResponse {
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(name))
             .map(|(_, v)| v.as_str())
+    }
+
+    /// The elements of every header matching `name`, split on commas.
+    pub(crate) fn header_list(&self, name: &str) -> impl Iterator<Item = &str> + Clone {
+        self.headers
+            .iter()
+            .filter(move |(k, _)| k.eq_ignore_ascii_case(name))
+            .flat_map(|(_, v)| v.split(','))
+            .map(str::trim)
+    }
+
+    /// The content length, `None` without the header. Fails with the
+    /// header values when one is invalid or two differ.
+    pub(crate) fn content_length(&self) -> Result<Option<usize>, String> {
+        let values = self.header_list(HTTP_CONTENT_LENGTH);
+        let mut len = None;
+
+        for value in values.clone() {
+            let is_digits = value.bytes().all(|b| b.is_ascii_digit());
+            let n = is_digits.then(|| value.parse::<usize>().ok()).flatten();
+
+            match (n, len) {
+                (Some(n), None) => len = Some(n),
+                (Some(n), Some(len)) if n == len => {}
+                _ => return Err(values.collect::<Vec<_>>().join(", ")),
+            }
+        }
+
+        Ok(len)
     }
 }
 
@@ -82,13 +114,6 @@ impl HttpResponseBuilder {
     pub(crate) fn header(&mut self, name: &str, value: &[u8]) {
         let value = String::from_utf8_lossy(value).into_owned();
         self.headers.push((name.to_lowercase(), value));
-    }
-
-    pub(crate) fn get_header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v.as_str())
     }
 
     pub(crate) fn build(self, body: Vec<u8>) -> HttpResponse {
@@ -150,15 +175,6 @@ mod tests {
         let mut builder = HttpResponseBuilder::default();
         builder.header("Content-Type", b"text/plain");
         assert_eq!(builder.headers[0].0, "content-type");
-    }
-
-    #[test]
-    fn builder_get_header_case_insensitive() {
-        let mut builder = HttpResponseBuilder::default();
-        builder.header("Content-Type", b"text/html");
-        assert_eq!(builder.get_header("Content-Type"), Some("text/html"));
-        assert_eq!(builder.get_header("content-type"), Some("text/html"));
-        assert_eq!(builder.get_header("CONTENT-TYPE"), Some("text/html"));
     }
 
     #[test]

@@ -30,7 +30,7 @@ pub enum Http11ChunksReadError {
     /// The chunk size line is not a valid hexadecimal integer.
     #[error("HTTP/1.1 read chunks failed: invalid chunk size `{0}`")]
     InvalidChunkSize(String),
-    /// The stream reached EOF before the zero-length terminator.
+    /// The stream reached EOF before the end of the chunked body.
     #[error("HTTP/1.1 read chunks failed: reached unexpected EOF")]
     Eof,
     /// The chunk size line exceeds [`HTTP11_MAX_CHUNK_LINE_LEN`].
@@ -39,6 +39,12 @@ pub enum Http11ChunksReadError {
     /// The decoded body would exceed [`Http11ChunksRead::max_body_len`].
     #[error("HTTP/1.1 read chunks failed: body exceeds {0} bytes")]
     BodyTooLarge(usize),
+    /// The chunk data is not followed by CRLF.
+    #[error("HTTP/1.1 read chunks failed: chunk data not followed by CRLF")]
+    InvalidChunkTerminator,
+    /// A trailer line exceeds [`HTTP11_MAX_CHUNK_LINE_LEN`].
+    #[error("HTTP/1.1 read chunks failed: trailer line exceeds {0} bytes")]
+    TrailerLineTooLarge(usize),
 }
 
 /// Terminal output of [`Http11ChunksRead`].
@@ -46,7 +52,7 @@ pub enum Http11ChunksReadError {
 pub struct Http11ChunksReadOutput {
     /// The decoded body, all chunks concatenated.
     pub body: Vec<u8>,
-    /// Bytes already buffered past the zero-length terminator.
+    /// Bytes already buffered past the end of the trailer section.
     pub remaining: Vec<u8>,
 }
 
@@ -55,10 +61,11 @@ enum State {
     #[default]
     ChunkSize,
     ChunkData(usize),
+    Trailers,
 }
 
 /// I/O-free coroutine to read an HTTP response body using chunked
-/// transfer coding.
+/// transfer coding. Trailer fields are read and dropped.
 #[derive(Debug)]
 pub struct Http11ChunksRead {
     /// Maximum size in bytes of the decoded body, all chunks
@@ -170,8 +177,14 @@ impl HttpCoroutine for Http11ChunksRead {
                     }
 
                     self.start += crlf + CRLF.len();
-                    debug!("reading chunk of {n} bytes");
-                    self.state = State::ChunkData(n);
+
+                    if n == 0 {
+                        debug!("reading trailers");
+                        self.state = State::Trailers;
+                    } else {
+                        debug!("reading chunk of {n} bytes");
+                        self.state = State::ChunkData(n);
+                    }
                 }
                 State::ChunkData(size) if rest.len() < size + CRLF.len() => {
                     trace!("received incomplete chunk data {}/{size}", rest.len());
@@ -179,10 +192,36 @@ impl HttpCoroutine for Http11ChunksRead {
                     continue;
                 }
                 State::ChunkData(size) => {
+                    if rest[size..size + CRLF.len()] != CRLF {
+                        let err = Http11ChunksReadError::InvalidChunkTerminator;
+                        return HttpCoroutineState::Complete(Err(err));
+                    }
+
                     self.body.extend_from_slice(&rest[..size]);
                     self.start += size + CRLF.len();
                     self.state = State::ChunkSize;
-                    self.last_chunk = size == 0;
+                }
+                State::Trailers => {
+                    let line_window = rest.len().min(HTTP11_MAX_CHUNK_LINE_LEN + CRLF.len());
+
+                    let Some(crlf) = crlf_position(&rest[..line_window]) else {
+                        if line_window == HTTP11_MAX_CHUNK_LINE_LEN + CRLF.len() {
+                            let limit = HTTP11_MAX_CHUNK_LINE_LEN;
+                            let err = Http11ChunksReadError::TrailerLineTooLarge(limit);
+                            return HttpCoroutineState::Complete(Err(err));
+                        }
+
+                        self.wants_read = true;
+                        continue;
+                    };
+
+                    self.start += crlf + CRLF.len();
+
+                    if crlf == 0 {
+                        self.last_chunk = true;
+                    } else {
+                        trace!("ignore trailer field of {crlf} bytes");
+                    }
                 }
             }
         }
