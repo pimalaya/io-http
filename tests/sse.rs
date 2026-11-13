@@ -14,6 +14,7 @@ use std::{
 use io_http::{
     client::{HttpClientError, HttpClientStd, SseStream},
     rfc9110::request::HttpRequest,
+    sse::frame::{SSE_DEFAULT_MAX_LINE_LEN, SseFrameParserError},
 };
 use url::Url;
 
@@ -183,4 +184,24 @@ fn comment_lines_are_skipped() {
 
     let frame = sse.next_frame().unwrap().expect("frame");
     assert_eq!(frame.data, "hi");
+}
+
+#[test]
+fn err_on_line_over_limit() {
+    let line = "a".repeat(SSE_DEFAULT_MAX_LINE_LEN + 1);
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n{:X}\r\n{line}\r\n0\r\n\r\n",
+        line.len()
+    );
+    let (_mock, sse) = open(response.as_bytes());
+    let mut sse = sse.unwrap();
+
+    match sse.next_frame() {
+        Err(HttpClientError::SseFrameParser(SseFrameParserError::LineTooLarge(len))) => {
+            assert_eq!(len, SSE_DEFAULT_MAX_LINE_LEN)
+        }
+        other => panic!("expected LineTooLarge, got {other:?}"),
+    }
+
+    assert!(sse.next_frame().unwrap().is_none());
 }

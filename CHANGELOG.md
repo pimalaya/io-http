@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added `max_line_len` to `sse::frame::SseFrameParser`, 64 KiB by default.
+- Added `max_event_len` to `sse::frame::SseFrameParser`, 1 MiB by default.
+- Added `sse::frame::SseFrameParserError`.
+- Added the event stream parser to the `response` fuzz target.
+
+### Changed
+
+- **BREAKING**: Changed `sse::frame::SseFrameParser` to fail with `LineTooLarge` and `EventTooLarge`.
+
+  Its `Return` is now `Result<Infallible, SseFrameParserError>` instead of `Infallible`.
+
+- **BREAKING**: Changed `client::HttpClientError` to fail with `SseFrameParser`.
+
+### Fixed
+
+- Fixed event stream lines and events being buffered without bound.
+
+  A server exceeding a limit now fails the parser, and ends `client::SseStream` with the error.
+
 ## [0.6.0] - 2026-11-03
 
 ### Added

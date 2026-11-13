@@ -1,6 +1,7 @@
 //! I/O-free coroutine decoding a W3C [Server-Sent Events] stream.
-//! Line-oriented and infallible: the parser never terminates and the
-//! outer driver stops when the body stream closes.
+//! Line-oriented: the parser never completes on its own, it fails once
+//! a line or an event exceeds its limit, and the caller stops when the
+//! body stream closes.
 //!
 //! [Server-Sent Events]: https://html.spec.whatwg.org/multipage/server-sent-events.html
 
@@ -12,6 +13,7 @@ use alloc::{
 };
 
 use log::trace;
+use thiserror::Error;
 
 use crate::{
     coroutine::*,
@@ -19,8 +21,25 @@ use crate::{
     scan::position,
 };
 
+/// Default value of [`SseFrameParser::max_line_len`]: 64 KiB.
+pub const SSE_DEFAULT_MAX_LINE_LEN: usize = 64 * 1024;
+
+/// Default value of [`SseFrameParser::max_event_len`]: 1 MiB.
+pub const SSE_DEFAULT_MAX_EVENT_LEN: usize = 1024 * 1024;
+
 /// The UTF-8 byte order mark, ignored once at the stream start.
 const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
+
+/// Failure causes of the Server-Sent Events frame parser.
+#[derive(Clone, Debug, Eq, PartialEq, Error)]
+pub enum SseFrameParserError {
+    /// A line exceeds [`SseFrameParser::max_line_len`].
+    #[error("SSE parse frame failed: line exceeds {0} bytes")]
+    LineTooLarge(usize),
+    /// The data of an event exceeds [`SseFrameParser::max_event_len`].
+    #[error("SSE parse frame failed: event exceeds {0} bytes")]
+    EventTooLarge(usize),
+}
 
 /// One dispatched Server-Sent Event. `event` is `None` when the
 /// `event:` field was absent; `data` has the trailing newline stripped.
@@ -47,8 +66,16 @@ pub enum SseFrameParserYield {
 }
 
 /// I/O-free Server-Sent Events frame parser.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SseFrameParser {
+    /// Maximum size in bytes of one line, its terminator excluded. A
+    /// longer line fails with [`SseFrameParserError::LineTooLarge`].
+    /// Defaults to [`SSE_DEFAULT_MAX_LINE_LEN`].
+    pub max_line_len: usize,
+    /// Maximum size in bytes of [`SseFrame::data`]. An event growing
+    /// past it fails with [`SseFrameParserError::EventTooLarge`].
+    /// Defaults to [`SSE_DEFAULT_MAX_EVENT_LEN`].
+    pub max_event_len: usize,
     buf: Vec<u8>,
     /// Where the bytes not consumed yet start in `buf`.
     start: usize,
@@ -60,6 +87,23 @@ pub struct SseFrameParser {
     data: String,
     last_event_id: Option<String>,
     retry: Option<u64>,
+}
+
+impl Default for SseFrameParser {
+    fn default() -> Self {
+        Self {
+            max_line_len: SSE_DEFAULT_MAX_LINE_LEN,
+            max_event_len: SSE_DEFAULT_MAX_EVENT_LEN,
+            buf: Vec::new(),
+            start: 0,
+            scanned: 0,
+            bom_checked: false,
+            event: None,
+            data: String::new(),
+            last_event_id: None,
+            retry: None,
+        }
+    }
 }
 
 impl SseFrameParser {
@@ -101,7 +145,7 @@ impl SseFrameParser {
 
 impl HttpCoroutine for SseFrameParser {
     type Yield = SseFrameParserYield;
-    type Return = Infallible;
+    type Return = Result<Infallible, SseFrameParserError>;
 
     fn resume(&mut self, arg: Option<&[u8]>) -> HttpCoroutineState<Self::Yield, Self::Return> {
         if let Some(data) = arg {
@@ -129,8 +173,18 @@ impl HttpCoroutine for SseFrameParser {
 
         loop {
             let Some((len, consumed)) = self.next_line() else {
+                if self.scanned > self.max_line_len {
+                    let err = SseFrameParserError::LineTooLarge(self.max_line_len);
+                    return HttpCoroutineState::Complete(Err(err));
+                }
+
                 return HttpCoroutineState::Yielded(SseFrameParserYield::WantsBytes);
             };
+
+            if len > self.max_line_len {
+                let err = SseFrameParserError::LineTooLarge(self.max_line_len);
+                return HttpCoroutineState::Complete(Err(err));
+            }
 
             let line = &self.buf[self.start..self.start + len];
             self.start += consumed;
@@ -170,6 +224,14 @@ impl HttpCoroutine for SseFrameParser {
             match name {
                 "event" => self.event = Some(value.to_string()),
                 "data" => {
+                    if self.data.len() + value.len() > self.max_event_len {
+                        // NOTE: rewinds the line, a later resume fails again
+                        self.start -= consumed;
+
+                        let err = SseFrameParserError::EventTooLarge(self.max_event_len);
+                        return HttpCoroutineState::Complete(Err(err));
+                    }
+
                     self.data.push_str(value);
                     self.data.push('\n');
                 }
@@ -228,12 +290,25 @@ mod tests {
                         frames.push(frame)
                     }
                     HttpCoroutineState::Yielded(SseFrameParserYield::WantsBytes) => break,
-                    HttpCoroutineState::Complete(never) => match never {},
+                    HttpCoroutineState::Complete(Err(err)) => panic!("{err}"),
                 }
             }
         }
 
         frames
+    }
+
+    /// The error a step completed with, `None` when it wants bytes.
+    fn end(
+        state: HttpCoroutineState<SseFrameParserYield, Result<Infallible, SseFrameParserError>>,
+    ) -> Option<SseFrameParserError> {
+        match state {
+            HttpCoroutineState::Yielded(SseFrameParserYield::WantsBytes) => None,
+            HttpCoroutineState::Yielded(SseFrameParserYield::Frame(frame)) => {
+                panic!("got {frame:?}")
+            }
+            HttpCoroutineState::Complete(Err(err)) => Some(err),
+        }
     }
 
     #[test]
@@ -300,7 +375,7 @@ mod tests {
                     frames.push(frame)
                 }
                 HttpCoroutineState::Yielded(SseFrameParserYield::WantsBytes) => break,
-                HttpCoroutineState::Complete(never) => match never {},
+                HttpCoroutineState::Complete(Err(err)) => panic!("{err}"),
             }
         }
 
@@ -320,7 +395,7 @@ mod tests {
             HttpCoroutineState::Yielded(SseFrameParserYield::WantsBytes) => {
                 unreachable!("wants bytes");
             }
-            HttpCoroutineState::Complete(never) => match never {},
+            HttpCoroutineState::Complete(Err(err)) => panic!("{err}"),
         }
 
         assert_eq!(parser.last_event_id(), None);
@@ -387,7 +462,7 @@ mod tests {
                         break;
                     }
                 }
-                HttpCoroutineState::Complete(never) => match never {},
+                HttpCoroutineState::Complete(Err(err)) => panic!("{err}"),
             }
         }
 
@@ -402,6 +477,101 @@ mod tests {
 
         assert_eq!(frames.len(), 3);
         assert_eq!(frames, collect(stream));
+    }
+
+    #[test]
+    fn partial_line_over_default_limit_errors() {
+        let mut parser = SseFrameParser::default();
+        let line = vec![b'a'; SSE_DEFAULT_MAX_LINE_LEN + 1];
+        let err = SseFrameParserError::LineTooLarge(SSE_DEFAULT_MAX_LINE_LEN);
+
+        let state = parser.resume(Some(&line));
+        assert_eq!(end(state), Some(err));
+    }
+
+    #[test]
+    fn unfinished_event_over_default_limit_errors() {
+        let mut parser = SseFrameParser::default();
+        let lines = b"data: 0123456789abcdef\n".repeat(64 * 1024 + 1);
+        let err = SseFrameParserError::EventTooLarge(SSE_DEFAULT_MAX_EVENT_LEN);
+
+        let state = parser.resume(Some(&lines));
+        assert_eq!(end(state), Some(err));
+    }
+
+    #[test]
+    fn line_at_limit_passes() {
+        let mut parser = SseFrameParser {
+            max_line_len: 8,
+            ..Default::default()
+        };
+
+        let state = parser.resume(Some(b"data: ab\r"));
+        assert_eq!(end(state), None);
+
+        let state = parser.resume(Some(b"\n\n"));
+        let HttpCoroutineState::Yielded(SseFrameParserYield::Frame(frame)) = state else {
+            panic!("got {state:?}");
+        };
+        assert_eq!(frame.data, "ab");
+    }
+
+    #[test]
+    fn line_over_limit_errors_whole_or_split() {
+        let stream = b"data: abc\n\n";
+        let err = Some(SseFrameParserError::LineTooLarge(8));
+
+        let mut parser = SseFrameParser {
+            max_line_len: 8,
+            ..Default::default()
+        };
+        assert_eq!(end(parser.resume(Some(stream))), err);
+
+        let mut parser = SseFrameParser {
+            max_line_len: 8,
+            ..Default::default()
+        };
+        assert_eq!(end(parser.resume(Some(&stream[..8]))), None);
+        assert_eq!(end(parser.resume(Some(&stream[8..9]))), err);
+    }
+
+    #[test]
+    fn event_at_limit_passes() {
+        let mut parser = SseFrameParser {
+            max_event_len: 5,
+            ..Default::default()
+        };
+
+        let state = parser.resume(Some(b"data: ab\ndata: cd\n\n"));
+        let HttpCoroutineState::Yielded(SseFrameParserYield::Frame(frame)) = state else {
+            panic!("got {state:?}");
+        };
+        assert_eq!(frame.data, "ab\ncd");
+    }
+
+    #[test]
+    fn event_over_limit_errors_again_on_resume() {
+        let mut parser = SseFrameParser {
+            max_event_len: 5,
+            ..Default::default()
+        };
+
+        let state = parser.resume(Some(b"data: ab\ndata: cde\n\n"));
+        assert_eq!(end(state), Some(SseFrameParserError::EventTooLarge(5)));
+
+        let state = parser.resume(Some(b"data: f\n\n"));
+        assert_eq!(end(state), Some(SseFrameParserError::EventTooLarge(5)));
+    }
+
+    #[test]
+    fn empty_data_lines_over_limit_errors() {
+        let mut parser = SseFrameParser {
+            max_event_len: 2,
+            ..Default::default()
+        };
+
+        let state = parser.resume(Some(b"data\ndata\ndata\ndata\n"));
+        assert_eq!(end(state), Some(SseFrameParserError::EventTooLarge(2)));
     }
 
     #[test]

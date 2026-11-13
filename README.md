@@ -24,7 +24,7 @@ This library is composed of 3 feature-gated layers:
 
 - **I/O-free coroutines**: no_std state machines, usable from any blocking or async runtime.
 - **HTTP/1.0 and HTTP/1.1**: requests and responses with fixed-length, chunked and read-to-EOF bodies.
-- **Bounded responses**: heads, bodies and chunks capped by configurable limits.
+- **Bounded responses**: heads, bodies, chunks, event stream lines and events capped by configurable limits.
 - **Streaming**: chunked responses and server-sent events consumed as they arrive.
 - **Authentication**: basic and bearer authorization values, credentials redacted from logs.
 - **Full client**: blocking client with TLS via Rustls (`rustls-ring` default, `rustls-aws`) or Native TLS (`native-tls`).

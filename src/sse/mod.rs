@@ -2,7 +2,8 @@
 //!
 //! The frame parser is decoupled from the body transport: bytes come in via
 //! [`frame::SseFrameParser`]'s `HttpCoroutine::resume`, dispatched events come
-//! out as [`frame::SseFrame`].
+//! out as [`frame::SseFrame`]. A line or an event over the parser's
+//! limits fails it.
 //!
 //! [Server-Sent Events]: https://html.spec.whatwg.org/multipage/server-sent-events.html
 

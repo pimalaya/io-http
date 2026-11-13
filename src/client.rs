@@ -85,6 +85,9 @@ pub enum HttpClientError {
     /// The streaming chunked-body decoder failed.
     #[error(transparent)]
     ChunkStream(#[from] Http11ChunksReadStreamError),
+    /// The Server-Sent Events frame parser failed.
+    #[error(transparent)]
+    SseFrameParser(#[from] SseFrameParserError),
     /// The implementor's own transport failed.
     ///
     /// [`HttpClientStd`] reports I/O through [`Self::Io`]; this variant
@@ -376,7 +379,8 @@ impl SseStream {
     }
 
     /// Drives chunked + SSE decoding until the next event; [`None`] on
-    /// connection close or zero-length chunk terminator.
+    /// connection close or zero-length chunk terminator. A line or an
+    /// event over the [`SseFrameParser`] default limits ends the stream.
     pub fn next_frame(&mut self) -> Result<Option<SseFrame>, HttpClientError> {
         if self.done {
             return Ok(None);
@@ -397,7 +401,10 @@ impl SseStream {
                         }
                     }
                 }
-                HttpCoroutineState::Complete(never) => match never {},
+                HttpCoroutineState::Complete(Err(err)) => {
+                    self.done = true;
+                    return Err(err.into());
+                }
             }
         }
     }
