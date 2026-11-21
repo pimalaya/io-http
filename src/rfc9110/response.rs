@@ -6,10 +6,9 @@ use core::fmt;
 
 use alloc::{string::String, vec::Vec};
 
-use crate::rfc9110::{
-    headers::{HTTP_CONTENT_LENGTH, HttpHeadersDebug},
-    status::HttpStatusCode,
-};
+#[cfg(feature = "client")]
+use crate::rfc9110::headers::HTTP_CONTENT_LENGTH;
+use crate::rfc9110::{headers::HttpHeadersDebug, status::HttpStatusCode};
 
 /// An incoming HTTP response. Header names are stored lowercase.
 ///
@@ -36,6 +35,7 @@ impl HttpResponse {
             .map(|(_, v)| v.as_str())
     }
 
+    #[cfg(feature = "client")]
     /// The elements of every header matching `name`, split on commas.
     pub(crate) fn header_list(&self, name: &str) -> impl Iterator<Item = &str> + Clone {
         self.headers
@@ -45,6 +45,7 @@ impl HttpResponse {
             .map(str::trim)
     }
 
+    #[cfg(feature = "client")]
     /// The content length, `None` without the header. Fails with the
     /// header values when one is invalid or two differ.
     pub(crate) fn content_length(&self) -> Result<Option<usize>, String> {
@@ -77,6 +78,7 @@ impl fmt::Debug for HttpResponse {
     }
 }
 
+#[cfg(feature = "client")]
 /// Incremental builder for [`HttpResponse`].
 #[derive(Clone)]
 pub(crate) struct HttpResponseBuilder {
@@ -85,6 +87,7 @@ pub(crate) struct HttpResponseBuilder {
     pub(crate) headers: Vec<(String, String)>,
 }
 
+#[cfg(feature = "client")]
 impl Default for HttpResponseBuilder {
     fn default() -> Self {
         Self {
@@ -95,6 +98,7 @@ impl Default for HttpResponseBuilder {
     }
 }
 
+#[cfg(feature = "client")]
 impl HttpResponseBuilder {
     pub(crate) fn header(&mut self, name: &str, value: &[u8]) {
         let value = String::from_utf8_lossy(value).into_owned();
@@ -155,6 +159,7 @@ mod tests {
         assert_eq!(response.header("x-foo"), Some("first"));
     }
 
+    #[cfg(feature = "client")]
     #[test]
     fn builder_stores_headers_lowercase() {
         let mut builder = HttpResponseBuilder::default();
@@ -162,18 +167,21 @@ mod tests {
         assert_eq!(builder.headers[0].0, "content-type");
     }
 
+    #[cfg(feature = "client")]
     #[test]
     fn builder_build_defaults_to_200() {
         let response = HttpResponseBuilder::default().build(vec![]);
         assert_eq!(*response.status, 200);
     }
 
+    #[cfg(feature = "client")]
     #[test]
     fn builder_default_version_is_http11() {
         let response = HttpResponseBuilder::default().build(vec![]);
         assert_eq!(response.version, "HTTP/1.1");
     }
 
+    #[cfg(feature = "client")]
     #[test]
     fn builder_build_transfers_fields() {
         let mut builder = HttpResponseBuilder {

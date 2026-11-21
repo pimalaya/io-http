@@ -11,5 +11,7 @@ pub(crate) mod chars;
 pub mod headers;
 pub mod request;
 pub mod response;
+#[cfg(feature = "client")]
+#[cfg_attr(docsrs, doc(cfg(feature = "client")))]
 pub mod send;
 pub mod status;

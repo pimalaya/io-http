@@ -12,5 +12,7 @@
 //! [RFC 1945]: https://www.rfc-editor.org/rfc/rfc1945
 
 pub mod request;
+#[cfg(feature = "client")]
+#[cfg_attr(docsrs, doc(cfg(feature = "client")))]
 pub mod send;
 pub mod version;

@@ -4,9 +4,9 @@ HTTP client library for Rust
 
 This library is composed of 3 feature-gated layers:
 
-- Low-level **I/O-free** coroutines: no_std-compatible state machines containing the whole HTTP logic, usable anywhere
-- Mid-level **light client**: a standard, blocking client wrapping a stream you opened yourself
-- High-level **full client**: the light client plus TCP connections and TLS negotiations handled for you
+- Low-level **I/O-free** coroutines: no_std-compatible state machines containing the whole HTTP logic, usable anywhere (`client` feature, enabled by default)
+- Mid-level **light client**: a standard, blocking client wrapping a stream you opened yourself (`std` feature)
+- High-level **full client**: the light client plus TCP connections and TLS negotiations handled for you (`rustls-ring`, `rustls-aws` or `native-tls` feature, each implying `std`)
 
 ## Table of contents
 
@@ -30,7 +30,7 @@ This library is composed of 3 feature-gated layers:
 - **Full client**: blocking client with TLS via Rustls (`rustls-ring` default, `rustls-aws`) or Native TLS (`native-tls`).
 
 > [!TIP]
-> I/O HTTP is written in [Rust](https://www.rust-lang.org/) and uses [cargo features](https://doc.rust-lang.org/cargo/reference/features.html) to gate backend support. The default feature set is declared in [Cargo.toml](./Cargo.toml) or on [docs.rs](https://docs.rs/crate/io-http/latest/features).
+> I/O HTTP is written in [Rust](https://www.rust-lang.org/) and uses [cargo features](https://doc.rust-lang.org/cargo/reference/features.html) to gate the client layers. The default feature set is declared in [Cargo.toml](./Cargo.toml) or on [docs.rs](https://docs.rs/crate/io-http/latest/features).
 
 ## RFC coverage
 

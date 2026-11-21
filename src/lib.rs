@@ -8,8 +8,9 @@
 //! resumable state machine that emits read and write requests instead
 //! of performing I/O itself: the caller owns the socket and pumps the
 //! coroutine with the bytes it read, whatever the runtime (blocking,
-//! async, in-memory tests). The `client` feature ships a ready-made
-//! std-blocking pump for callers who just want a working client.
+//! async, in-memory tests). The `client` feature gates the coroutines,
+//! and the `std` feature ships a ready-made std-blocking pump for
+//! callers who just want a working client.
 //!
 //! ## Layout: one folder per RFC
 //!
@@ -38,7 +39,7 @@
 //! root: [`coroutine`] defines the coroutine contract every state
 //! machine implements, and [`sse`] parses W3C Server-Sent Events
 //! frames (a WHATWG HTML Living Standard, not an RFC, hence its own
-//! name). The optional [`client`] module (`client` feature) is the
+//! name). The optional [`client`] module (`std` feature) is the
 //! std-blocking pump: a light client wrapping any stream you opened
 //! yourself, or a full client opening the TCP/TLS connection itself
 //! when one of the TLS features is enabled.
@@ -59,7 +60,7 @@
 //!
 //! ## Conventions
 //!
-//! The crate is no_std with alloc; std only enters behind the `client`
+//! The crate is no_std with alloc; std only enters behind the `std`
 //! feature. Public items carry the version-agnostic `Http` prefix when
 //! they belong to the shared semantics, and the version-scoped
 //! `Http10` / `Http11` prefix when they are tied to a wire format; the
@@ -68,18 +69,26 @@
 //! and data dumps at trace level.
 
 extern crate alloc;
-#[cfg(feature = "client")]
+#[cfg(feature = "std")]
 extern crate std;
 
-#[cfg(feature = "client")]
+#[cfg(feature = "std")]
+#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 pub mod client;
+#[cfg(feature = "client")]
+#[cfg_attr(docsrs, doc(cfg(feature = "client")))]
 pub mod coroutine;
 pub mod rfc1945;
 pub mod rfc3986;
 pub mod rfc6750;
 pub mod rfc7617;
+#[cfg(feature = "client")]
+#[cfg_attr(docsrs, doc(cfg(feature = "client")))]
 pub mod rfc8615;
 pub mod rfc9110;
 pub mod rfc9112;
+#[cfg(feature = "client")]
 mod scan;
+#[cfg(feature = "client")]
+#[cfg_attr(docsrs, doc(cfg(feature = "client")))]
 pub mod sse;

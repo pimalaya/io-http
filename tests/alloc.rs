@@ -4,6 +4,8 @@
 //! not see each other, and a reallocation counts as a new block next to
 //! the old one, the worst case of a buffer that grows.
 
+#![cfg(feature = "client")]
+
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     cell::Cell,

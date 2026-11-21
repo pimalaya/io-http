@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 arbitrary = { version = "1", features = ["derive"] }
-io-http = { path = "..", default-features = false }
+io-http = { path = "..", default-features = false, features = ["client"] }
 libfuzzer-sys = "0.4"
 url = "2.5"
 

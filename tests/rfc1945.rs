@@ -3,6 +3,8 @@
 //! All tests drive [`Http10Send`] against a pre-crafted in-memory
 //! response buffer. No network connection is made.
 
+#![cfg(feature = "client")]
+
 use io_http::{
     coroutine::*,
     rfc1945::send::{Http10Send, Http10SendError},

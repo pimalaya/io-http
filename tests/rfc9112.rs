@@ -3,6 +3,8 @@
 //! All tests drive [`Http11Send`] against a pre-crafted in-memory
 //! response buffer. No network connection is made.
 
+#![cfg(feature = "client")]
+
 use io_http::{
     coroutine::*,
     rfc9110::{

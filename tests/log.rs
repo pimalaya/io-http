@@ -1,5 +1,7 @@
 //! Tests for what the crate logs: no credential reaches a log line.
 
+#![cfg(feature = "client")]
+
 use std::sync::Mutex;
 
 use io_http::{

@@ -6,9 +6,17 @@
 //!
 //! [RFC 9112]: https://www.rfc-editor.org/rfc/rfc9112
 
+#[cfg(feature = "client")]
+#[cfg_attr(docsrs, doc(cfg(feature = "client")))]
 pub mod chunk;
+#[cfg(feature = "client")]
+#[cfg_attr(docsrs, doc(cfg(feature = "client")))]
 pub mod chunk_stream;
+#[cfg(feature = "client")]
+#[cfg_attr(docsrs, doc(cfg(feature = "client")))]
 pub mod read_headers;
 pub mod request;
+#[cfg(feature = "client")]
+#[cfg_attr(docsrs, doc(cfg(feature = "client")))]
 pub mod send;
 pub mod version;

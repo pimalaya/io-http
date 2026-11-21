@@ -3,7 +3,7 @@
 //! Drives [`HttpClientStd::send_streaming`] against a mock
 //! `Read + Write` stream that replays a pre-crafted response.
 
-#![cfg(feature = "client")]
+#![cfg(feature = "std")]
 
 use std::{
     io::{self, Read, Write},

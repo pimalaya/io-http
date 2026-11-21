@@ -17,25 +17,28 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["rustls-ring"]
+default = ["client", "rustls-ring"]
 client = []
-rustls-ring = ["client", "pimalaya-stream/rustls-ring", "dep:anyhow", "dep:pimalaya-stream"]
-rustls-aws = ["client", "pimalaya-stream/rustls-aws", "dep:anyhow", "dep:pimalaya-stream"]
-native-tls = ["client", "pimalaya-stream/native-tls", "dep:anyhow", "dep:pimalaya-stream"]
+std = ["client"]
+rustls-ring = ["std", "pimalaya-stream/rustls-ring", "dep:anyhow", "dep:pimalaya-stream"]
+rustls-aws = ["std", "pimalaya-stream/rustls-aws", "dep:anyhow", "dep:pimalaya-stream"]
+native-tls = ["std", "pimalaya-stream/native-tls", "dep:anyhow", "dep:pimalaya-stream"]
 vendored = ["pimalaya-stream?/vendored"]
 
 [[example]]
 name = "std_http10"
 path = "examples/std_http10.rs"
+required-features = ["client"]
 
 [[example]]
 name = "tokio_http11"
 path = "examples/tokio_http11.rs"
+required-features = ["client"]
 
 [[example]]
 name = "tokio_client"
 path = "examples/tokio_client.rs"
-required-features = ["client"]
+required-features = ["std"]
 
 [[example]]
 name = "std_http11"

@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING**: Renamed the `client` feature, which gated the blocking client, to `std`.
+
+  A consumer naming it moves to the new name:
+
+  ```toml
+  # before
+  io-http = { version = "0.8", default-features = false, features = ["client"] }
+  # after
+  io-http = { version = "0.9", default-features = false, features = ["std"] }
+  ```
+
+- **BREAKING**: Changed the `client` feature to gate the coroutines (`coroutine`, `sse`, `rfc8615`, `rfc1945::send`, `rfc9110::send`, `rfc9112::send`, `rfc9112::read_headers`, `rfc9112::chunk` and `rfc9112::chunk_stream`).
+
+  It is on by default and implied by `std` and the TLS features. The vocabulary (request, response, status, headers, challenges, authorization values, URL building) stays compiled under no feature. A consumer turning default features off to drive the coroutines itself adds it:
+
+  ```toml
+  # before
+  io-http = { version = "0.8", default-features = false }
+  # after
+  io-http = { version = "0.9", default-features = false, features = ["client"] }
+  ```
+
+- **BREAKING**: Changed the TLS features (`rustls-ring`, `rustls-aws`, `native-tls`) to imply `std`.
+
 ## [0.8.0] - 2026-11-13
 
 ### Changed
